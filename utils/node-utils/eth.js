@@ -8,6 +8,10 @@ const { flattenObject, sortObject, getTimestamp } = require('../helpers')
 const crypto = require('../crypto')
 const ERC20_ABI = require('../../data/ERC20-ABI')
 const ERC721_ABI = require('../../data/ERC721-ABI')
+const {
+  nameToChainIdMap,
+  getBaseChain
+} = require('../constants')
 
 const _generalWeb3Instance = new Web3()
 const soliditySha3 = _generalWeb3Instance.utils.soliditySha3
@@ -33,26 +37,6 @@ const _networksWeb3 = {
   421611: new Web3(new HttpProvider('https://rinkeby.arbitrum.io/rpc')),
   42161: new Web3(new HttpProvider('https://arb1.arbitrum.io/rpc')),
   1088: new Web3(new HttpProvider(' https://andromeda.metis.io/?owner=1088'))
-}
-
-const nameToChainIdMap = {
-  local: 'ganache',
-  eth: 1, // Ethereum mainnet
-  ropsten: 3, // Ethereum ropsten testnet
-  rinkeby: 4, // Ethereum rinkeby testnet
-  bsc: 56, // Binance Smart Chain mainnet
-  bsctest: 97, // Binance Smart Chain testnet
-  ftm: 250, // Fantom mainnet
-  ftmtest: 4002, // Fantom testnet
-  xdai: 100, // Xdai mainnet
-  sokol: 77, // Xdai testnet
-  polygon: 137, // polygon mainnet
-  mumbai: 80001, // Polygon mumbai testnet
-  fuji: 43113, // Avalanche Fuji Testnet
-  avax: 43114, // Avalanche Mainnet
-  arbitrumTestnet: 421611, //Arbitrum Testnet
-  arbitrum: 42161, // Arbitrum
-  metis: 1088 // Metis
 }
 
 function getWeb3(network) {

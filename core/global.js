@@ -6,6 +6,7 @@ const { timeout, floatToBN } = require('../utils/helpers')
 const util = require('ethereumjs-util')
 const ws = require('ws')
 const ethSigUtil = require('eth-sig-util')
+const {getBaseChain} = require('../utils/constants')
 const {
   read: ethRead,
   call: ethCall,
@@ -14,7 +15,16 @@ const {
   hashCallOutput: ethHashCallOutput
 } = require('../utils/node-utils/eth')
 
+const solana = require('../utils/node-utils/solana')
+
+const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+const baseX = require('base-x');
+const HEX = '0123456789abcdef';
+const hex = baseX(HEX);
+const bs58 = baseX(BASE58);
+
 const { multiCall } = require('../utils/multicall')
+
 function soliditySha3(params) {
   return web3Instance.utils.soliditySha3(...params)
 }
@@ -24,6 +34,8 @@ global.MuonAppUtils = {
   Web3,
   ws,
   timeout,
+  hex,
+  bs58,
   BN: Web3.utils.BN,
   toBN: Web3.utils.toBN,
   floatToBN,
@@ -37,5 +49,8 @@ global.MuonAppUtils = {
   soliditySha3,
   ecRecover: util.ecrecover,
   recoverTypedSignature: ethSigUtil.recoverTypedSignature,
-  recoverTypedMessage: ethSigUtil.recoverTypedMessage
+  recoverTypedMessage: ethSigUtil.recoverTypedMessage,
+
+  getBaseChain,
+  solana,
 }
