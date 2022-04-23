@@ -225,11 +225,6 @@ module.exports = {
   getTransactionReceipt,
   call,
   read,
-  isEqualObject,
-  isEqualResult,
-  signRequest,
-  recoverSignature,
-  createCID,
   subscribeLogEvent,
   getTokenInfo,
   getNftInfo
