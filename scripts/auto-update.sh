@@ -17,7 +17,7 @@ setup (){
         exit;
     fi
     backup=`crontab -l`
-    new_cron="*/5 * * * * export _PM2=`which pm2`; export _NPM=`which npm`; export _PM2_APP='$pm2_app'; $absolute_path -a update"; # every 5 minutes
+    new_cron="* * * * * export _PM2=`which pm2`; export _NPM=`which npm`; export _PM2_APP='$pm2_app'; $absolute_path -a update"; # every 5 minutes
     if [[ "$backup" == *"$new_cron"* ]]
     then
         echo "Already exist.";
@@ -36,8 +36,8 @@ check_for_update (){
     else
         # restart services
         log "========== updating detected ===========";
-        log "Installing dependencies ...";
-        log `$_NPM install`
+        # log "Installing dependencies ...";
+        # log `$_NPM install`
         log "Restarting PM2 ...";
         log `$_PM2 restart "$_PM2_APP"`
         log "============ updating done =============";
@@ -55,7 +55,7 @@ done
 if [[ "$action" == "setup" ]]
 then
     log `setup`;
-    exit 1;
+    exit 0;
 elif [[ "$action" == "update" ]]
 then
     check_for_update;

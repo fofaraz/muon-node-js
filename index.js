@@ -93,6 +93,9 @@ var muon;
     ... otherConfigs
   } = config
   try {
+    // const nodeVersion = process.versions.node.split('.');
+    // if(nodeVersion[0] < '16')
+    //   throw {message: `Node version most be >="16.0.0". current version is "${process.versions.node}"`}
     muon = new Muon({
       libp2p: {
         // TODO: replace env.peerId with config.peerId
@@ -102,6 +105,7 @@ var muon;
           pubKey: process.env.PEER_PUBLIC_KEY,
           privKey: process.env.PEER_PRIVATE_KEY
         },
+        host: process.env.PEER_HOST || "0.0.0.0",
         port: process.env.PEER_PORT,
         bootstrap: getEnvBootstraps()
       },

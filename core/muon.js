@@ -8,6 +8,7 @@ const emoji = require('node-emoji')
 const tss = require('../utils/tss')
 const fs = require('fs')
 const TimeoutPromise = require('./timeout-promise')
+// const isPrivate = require('libp2p-utils/src/multiaddr/is-private')
 
 
 class Muon extends Events {
@@ -15,11 +16,11 @@ class Muon extends Events {
   peerId = null
   libp2p = null
   _plugins = {}
+  _apps = {}
 
   constructor(configs) {
     super()
     this.configs = configs
-    this.firstPeerConnect = new TimeoutPromise();
   }
 
   async initialize() {
@@ -33,7 +34,11 @@ class Muon extends Events {
     let libp2p = await Node.create({
       peerId,
       addresses: {
-        listen: [`/ip4/0.0.0.0/tcp/${configs.port}`]
+        listen: [
+          `/ip4/${configs.host}/tcp/${configs.port}`,
+          // `/ip4/0.0.0.0/tcp/${parseInt(configs.port)+1}/ws`,
+        ],
+        // announceFilter: (multiaddrs) => multiaddrs.filter(m => !isPrivate(m))
       },
       config: {
         peerDiscovery: {
@@ -44,11 +49,11 @@ class Muon extends Events {
           }
         }
       }
-    })
+    });
 
     libp2p.connectionManager.on('peer:connect', this.onPeerConnect.bind(this))
+    libp2p.connectionManager.on('peer:disconnect', this.onPeerDisconnect.bind(this))
     libp2p.on('peer:discovery', this.onPeerDiscovery.bind(this))
-    // libp2p._dht.on('peer', () => this.firstPeerConnect.resolve(true));
 
     this.peerId = peerId
     this.libp2p = libp2p
@@ -74,14 +79,32 @@ class Muon extends Events {
       emoji.get('large_blue_circle'),
       chalk.blue(` ${connection.remotePeer.toB58String()}`)
     )
-    this.firstPeerConnect.resolve(true)
     this.emit('peer', connection.remotePeer)
   }
 
-  onPeerDiscovery(peerId){
+  onPeerDisconnect(connection){
+    console.log(
+      emoji.get('moon'),
+      chalk.red(' Node disconnected'),
+      emoji.get('large_blue_circle'),
+      chalk.red(` ${connection.remotePeer.toB58String()}`)
+    );
+    this.emit('peer:disconnect', connection.remotePeer)
+  }
+
+  async onPeerDiscovery(peerId){
     this.emit('peer', peerId)
-    this.firstPeerConnect.resolve(true)
-    console.log('found peer: ', peerId.toB58String())
+    console.log('found peer');
+    try {
+      const peerInfo = await this.libp2p.peerRouting.findPeer(peerId)
+      console.log({
+        peerId: peerId.toB58String(),
+        multiaddrs: peerInfo.multiaddrs,
+        // peerInfo,
+      })
+    }catch (e) {
+      console.log('Error Muon.onPeerDiscovery', e)
+    }
   }
 
   getAppByName(appName) {
@@ -108,20 +131,24 @@ class Muon extends Events {
       chalk.blue(` Listening on: ${this.configs.libp2p.port}`)
     )
 
+    // if(process.env.VERBOSE) {
+      console.log("====================== Bindings ====================")
+      this.libp2p.multiaddrs.forEach((ma) => {
+        console.log(ma.toString())
+        // console.log(`${ma.toString()}/p2p/${this.libp2p.peerId.toB58String()}`)
+      })
+      console.log("====================================================")
+    // }
+
     if (this.libp2p.isStarted()) {
-      this._onceStarted()
+      this._onceStarted();
     } else {
       this.libp2p.once('start', this._onceStarted.bind(this))
     }
   }
 
   async _onceStarted() {
-    // TODO:
-    // console.log('waiting for first peer connect ...');
-    // // wait for first peer connect;
-    // await this.firstPeerConnect.waitToFulfill();
-
-    console.log('muon started')
+    console.log(`muon started at ${new Date()} (node-js version ${process.versions.node}).`)
     for (let pluginName in this._plugins) {
       this._plugins[pluginName].onStart()
     }

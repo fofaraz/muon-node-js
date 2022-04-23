@@ -76,6 +76,20 @@ class TssPlugin extends CallablePlugin {
       console.log('first node connected ...')
       this.joinToGroup();
     })
+
+    this.muon.on('peer:disconnect', this.onPeerDisconnect.bind(this));
+  }
+
+  onPeerDisconnect(peer) {
+    if(this.isReady){
+      for(let wallet in this.tssParty.partners){
+        let {peerId} = this.tssParty.partners[wallet]
+        if(peerId === peer._idB58String){
+          this.tssParty.setWalletPeer(wallet, null);
+          return
+        }
+      }
+    }
   }
 
   get TSS_THRESHOLD() {
@@ -339,8 +353,10 @@ class TssPlugin extends CallablePlugin {
     /**
      * needs at least TSS_THRESHOLD number of nodes.
      */
-    if(Object.keys(nodesNeedGroup).length < TSS_THRESHOLD-1)
+    if(Object.keys(nodesNeedGroup).length < TSS_THRESHOLD-1) {
+      console.log(`No enough node to create tss group. already exist [${1+Object.keys(nodesNeedGroup).length}/${TSS_THRESHOLD}]`)
       return;
+    }
     let selfWallet = process.env.SIGN_WALLET_ADDRESS
     let wallets = Object.keys(nodesNeedGroup);
     /**
@@ -378,7 +394,7 @@ class TssPlugin extends CallablePlugin {
       keysCache.set(key.id, key, 0) // keep for ever
       this.tssKey = key;
       this.isReady = true;
-      this.informJoinedToGroup()
+      this.informJoinedToGroup();
       console.log('tss ready.')
     } catch (e) {
       console.error('TssPlugin.tryToCreateTssParty', e, e.stack);

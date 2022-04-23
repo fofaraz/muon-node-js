@@ -13,7 +13,7 @@ const {
   getTokenInfo: ethGetTokenInfo,
   getNftInfo: ethGetNftInfo,
   hashCallOutput: ethHashCallOutput
-} = require('../utils/node-utils/eth')
+} = require('../utils/eth')
 
 const solana = require('../utils/node-utils/solana')
 
