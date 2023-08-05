@@ -2,19 +2,20 @@ import CallablePlugin from './base/callable-plugin.js'
 import {PeerInfo} from "@libp2p/interface-peer-info";
 import {remoteApp, remoteMethod, ipcMethod} from './base/app-decorators.js'
 import {AppContext, AppRequest, IpcCallOptions, JsonPeerInfo, MuonNodeInfo} from "../../common/types";
-import CollateralInfoPlugin, {NodeFilterOptions} from "./collateral-info.js";
+import NodeManagerPlugin, {NodeFilterOptions} from "./node-manager.js";
 import {QueueProducer, MessagePublisher, MessageBusConfigs} from "../../common/message-bus/index.js";
 import _ from 'lodash';
 import RemoteCall from "./remote-call.js";
 import NetworkBroadcastPlugin from "./network-broadcast.js";
 // import NetworkDHTPlugin from "./network-dht.js";
-import NetworkContentPlugin from "./content-plugin.js";
 import {parseBool, timeout} from '../../utils/helpers.js'
 import NodeCache from 'node-cache'
 import * as CoreIpc from '../../core/ipc.js'
 import {logger} from '@libp2p/logger'
 import {isPrivate} from "../utils.js";
 import {GatewayCallParams} from "../../gateway/types";
+import LatencyCheckPlugin from "./latency-check.js";
+import {MapOf} from "../../common/mpc/types";
 
 class AggregatorBus extends MessagePublisher {
   async send(message:any){
@@ -54,11 +55,18 @@ const tasksCache = new NodeCache({
   useClones: false,
 });
 
+const appTimeouts = {}
+async function getAppTimeout(app) {
+  if(appTimeouts[app] === undefined) {
+    appTimeouts[app] = await CoreIpc.getAppTimeout(app);
+  }
+  return appTimeouts[app];
+}
+
 export const IpcMethods = {
   FilterNodes: "filter-nodes",
-  GetNodesList: "get-nodes-list",
   GetNetworkConfig: "get-net-conf",
-  GetCollateralInfo: "get-collateral-info",
+  GetNodeManagerData: "get-node-manager-data",
   SubscribeToBroadcastChannel: "subscribe-to-broadcast-channel",
   BroadcastToChannel: "broadcast-to-channel",
   // PutDHT: "put-dht",
@@ -66,25 +74,24 @@ export const IpcMethods = {
   ReportClusterStatus: "report-cluster-status",
   AskClusterPermission: "ask-cluster-permission",
   AssignTask: "assign-task",
-  RemoteCall: "remote-call",
+  ForwardCoreRemoteCall: "forward-core-remote-call",
   GetPeerInfo: "GPI",
   //GetPeerInfoLight: "GPILight",
-  GetClosestPeer: "GCPeer",
-  ContentRoutingProvide: "content-routing-provide",
-  ContentRoutingFind: "content-routing-find",
   ForwardGatewayRequest: "forward-gateway-request",
   GetCurrentNodeInfo: "get-current-node-info",
   AllowRemoteCallByShieldNode: "allow-remote-call-by-shield-node",
   IsCurrentNodeInNetwork: "is-current-node-in-network",
   GetUptime: "get-uptime",
   FindNOnlinePeer: "FNOP",
-  GetConnectedPeerIds: "GCPIDS",
   GetNodeMultiAddress: "GNMA",
   SendToAggregatorNode: "send-to-aggregator-node",
+  AddContextToLatencyCheck: "add-context-to-latency-check",
+  GetAppLatency: "get-app-latency",
+  IsNodeOnline: "is-node-online",
 } as const;
 
 export const RemoteMethods = {
-  ExecIpcRemoteCall: "exec-ipc-remote-call",
+  ExecCoreRemoteCall: "exec-core-remote-call",
   ForwardGateWayRequest: 'forward-gateway-request',
   AggregateData: "aggregate-data",
 }
@@ -109,20 +116,20 @@ class NetworkIpcHandler extends CallablePlugin {
   //   return this.network.getPlugin('dht')
   // }
 
-  get collateralPlugin(): CollateralInfoPlugin {
-    return this.network.getPlugin('collateral');
+  get nodeManager(): NodeManagerPlugin {
+    return this.network.getPlugin('node-manager');
   }
 
   get remoteCallPlugin(): RemoteCall {
     return this.network.getPlugin('remote-call');
   }
 
-  get contentPlugin(): NetworkContentPlugin {
-    return this.network.getPlugin('content');
+  get latencyCheckPlugin(): LatencyCheckPlugin {
+    return this.network.getPlugin('latency');
   }
 
   get RemoteCallExecEndPoint(): string {
-    return this.remoteMethodEndpoint(RemoteMethods.ExecIpcRemoteCall);
+    return this.remoteMethodEndpoint(RemoteMethods.ExecCoreRemoteCall);
   }
 
   /**
@@ -131,14 +138,8 @@ class NetworkIpcHandler extends CallablePlugin {
    */
   @ipcMethod(IpcMethods.FilterNodes)
   async __filterNodes(filter: NodeFilterOptions): Promise<MuonNodeInfo[]> {
-    return this.collateralPlugin.filterNodes(filter)
+    return this.nodeManager.filterNodes(filter)
       .map(({id, active, staker, wallet, peerId, isDeployer}) => ({id, active, staker, wallet, peerId, isDeployer}));
-  }
-
-  @ipcMethod(IpcMethods.GetNodesList)
-  async __getNodesList(output: string|string[]) {
-    let outProps = Array.isArray(output) ? output : [output]
-    return this.collateralPlugin.filterNodes({}).map(n => _.pick(n, outProps))
   }
 
   @ipcMethod(IpcMethods.GetNetworkConfig)
@@ -146,15 +147,11 @@ class NetworkIpcHandler extends CallablePlugin {
     return this.network.configs.net
   }
 
-  @ipcMethod(IpcMethods.GetCollateralInfo)
-  async __onIpcGetCollateralInfo(data = {}, callerInfo) {
-    const collateralPlugin: CollateralInfoPlugin = this.network.getPlugin('collateral');
-
-    let {networkInfo} = collateralPlugin;
+  @ipcMethod(IpcMethods.GetNodeManagerData)
+  async __onIpcGetNodeManagerData(data = {}, callerInfo) {
     return {
       contract: this.network.configs.net.nodeManager,
-      networkInfo,
-      nodesList: await collateralPlugin.getNodesList(),
+      nodesList: await this.nodeManager.getNodesList(),
     }
   }
 
@@ -199,20 +196,28 @@ class NetworkIpcHandler extends CallablePlugin {
         break;
       case "exit":
         delete this.clustersPids[pid];
+        for(const [key, data] of Object.entries(this.clusterPermissions)) {
+          if(data.pid === pid)
+            delete this.clusterPermissions[key];
+        }
         break;
     }
   }
 
-  clusterPermissions = {};
+  clusterPermissions: MapOf<{pid: number, time: number}> = {};
 
   @ipcMethod(IpcMethods.AskClusterPermission)
-  async __askClusterPermission(data, callerInfo) {
+  async __askClusterPermission(data: {key: string, pid: number, expireTime?: number}, callerInfo) {
+    const {key, pid, expireTime=Infinity} = data
     // every 20 seconds one process get permission to do election
     if (
-      (!this.clusterPermissions[data?.key])
-      || (Date.now() - this.clusterPermissions[data?.key] > data.expireTime)
+      (!this.clusterPermissions[key])
+      || (Date.now() - this.clusterPermissions[key].time > expireTime)
     ) {
-      this.clusterPermissions[data?.key] = Date.now()
+      this.clusterPermissions[key] = {
+        pid,
+        time: Date.now()
+      }
       return true
     } else
       return false;
@@ -246,14 +251,14 @@ class NetworkIpcHandler extends CallablePlugin {
    * @returns {Promise<[any]>}
    * @private
    */
-  @ipcMethod(IpcMethods.RemoteCall)
-  async __onRemoteCallRequest(data) {
+  @ipcMethod(IpcMethods.ForwardCoreRemoteCall)
+  async __forwardCoreRemoteCall(data) {
     const peer = await this.findPeer(data?.peer);
     if(!peer) {
       log(`trying to call offline node %o`, data)
       throw `peer not found peerId: ${data?.peer}`
     }
-    return await this.remoteCall(peer, "exec-ipc-remote-call", data, data?.options);
+    return await this.remoteCall(peer, RemoteMethods.ExecCoreRemoteCall, data, data?.options);
   }
 
   @ipcMethod(IpcMethods.GetPeerInfo)
@@ -268,67 +273,28 @@ class NetworkIpcHandler extends CallablePlugin {
     }
   }
 
-  // @ipcMethod(IpcMethods.GetPeerInfoLight)
-  // async __getPeerInfoLight(data): Promise<JsonPeerInfo|null> {
-  //   let peerInfo:PeerInfo|null = await this.findPeerLocal(data?.peerId);
-  //   if(!peerInfo)
-  //     return null
-  //   return {
-  //     id: peerInfo.id.toString(),
-  //     multiaddrs: peerInfo.multiaddrs.map(ma => ma.toString()),
-  //     protocols: peerInfo.protocols
-  //   }
-  // }
-
-  @ipcMethod(IpcMethods.GetClosestPeer)
-  async __getClosestPeer(data:{peerId?: string, cid?: string}): Promise<JsonPeerInfo[]> {
-    let {peerId, cid} = data ?? {}
-    if(!!peerId) {
-      /** return all bootstrap nodes info */
-      let bootstrapList: any[] = this.network.configs.net.bootstrap ?? [];
-      bootstrapList = bootstrapList
-        .map(ma => ({
-          peerId: ma.split('p2p/')[1],
-          multiaddr: ma
-        }))
-        /** exclude self address */
-        // .filter(({peerId}) => !!peerId && peerId !== process.env.PEER_ID)
-
-      let peerInfos = await Promise.all(bootstrapList.map(bs => {
-        return this.findPeerLocal(bs.peerId)
-      }))
-      return peerInfos
-        .filter(p => !!p)
-        .map(peerInfo => ({
-            id: peerInfo!.id.toString(),
-            multiaddrs: peerInfo!.multiaddrs.map(ma => ma.toString()),
-            protocols: peerInfo!.protocols
-          })
-        )
-    }
-    /** cid not supported yet */
-    return []
-  }
-
-  @ipcMethod(IpcMethods.ContentRoutingProvide)
-  async __contentRoutingProvide(cids: string | string[], callerInfo) {
-    await this.contentPlugin.provide(cids);
-  }
-
-  @ipcMethod(IpcMethods.ContentRoutingFind)
-  async __onContentRoutingFind(cid: string, callerInfo) {
-    return this.contentPlugin.find(cid);
-  }
-
   @ipcMethod(IpcMethods.ForwardGatewayRequest)
-  async __ipcForwardGateWayRequest(data: {id: string, requestData: GatewayCallParams, appTimeout: number}) {
-    const timeout = data.appTimeout || 35000
-    return this.forwardGatewayCallToOtherNode(data.id, data.requestData, timeout);
+  async __ipcForwardGateWayRequest(data: {requestData: GatewayCallParams, appTimeout: number}) {
+    const timeout = await getAppTimeout(data.requestData.app);
+    return this.__rcForwardGatewayRequest(data.requestData, this.nodeManager.currentNodeInfo, {timeout})
+  }
+
+  private async forwardGatewayRequestToOnlinePartner(partners: string[], requestData: GatewayCallParams, timeout?:number) {
+    const n = partners.length;
+    const candidatePartners = _.shuffle(partners).slice(0, Math.ceil(n/2));
+    const onlines: string[] = await this.nodeManager.findNOnline(candidatePartners, 1, {timeout: 5000});
+    if(onlines.length < 1)
+      throw `The request cannot be forwarded because there is no online partner`;
+    return this.forwardGatewayCallToOtherNode(
+      onlines[0],
+      requestData,
+      timeout,
+    )
   }
 
   private async forwardGatewayCallToOtherNode(nodeId: string, requestData: GatewayCallParams, timeout?: number) {
     log(`forwarding the request to the node. %o`, {target: nodeId, requestData})
-    const nodeInfo = this.collateralPlugin.getNodeInfo(nodeId)
+    const nodeInfo = this.nodeManager.getNodeInfo(nodeId)
     if(!nodeInfo) {
       throw `Unknown id ${nodeId}`
     }
@@ -338,8 +304,7 @@ class NetworkIpcHandler extends CallablePlugin {
 
   @ipcMethod(IpcMethods.GetCurrentNodeInfo)
   async __onGetCurrentNodeInfo() {
-    await this.collateralPlugin.waitToLoad();
-    return this.collateralPlugin.getNodeInfo(process.env.SIGN_WALLET_ADDRESS!);
+    return this.nodeManager.getNodeInfo(process.env.SIGN_WALLET_ADDRESS!);
   }
 
   @ipcMethod(IpcMethods.AllowRemoteCallByShieldNode)
@@ -350,8 +315,7 @@ class NetworkIpcHandler extends CallablePlugin {
 
   @ipcMethod(IpcMethods.IsCurrentNodeInNetwork)
   async __isCurrentNodeInNetwork() {
-    await this.collateralPlugin.waitToLoad();
-    const currentNodeInfo = this.collateralPlugin.getNodeInfo(process.env.SIGN_WALLET_ADDRESS!)
+    const currentNodeInfo = this.nodeManager.getNodeInfo(process.env.SIGN_WALLET_ADDRESS!)
     return !!currentNodeInfo;
   }
 
@@ -372,14 +336,9 @@ class NetworkIpcHandler extends CallablePlugin {
   }
 
   @ipcMethod(IpcMethods.FindNOnlinePeer)
-  async __findNOnlinePeer(data: {peerIds: string[], count: number, options?: any}) {
-    let {peerIds, count, options} = data;
-    return await this.collateralPlugin.findNOnline(peerIds, count, options)
-  }
-
-  @ipcMethod(IpcMethods.GetConnectedPeerIds)
-  async __getConnectedPeerIds() {
-    return await this.collateralPlugin.getConnectedPeerIds()
+  async __findNOnlinePeer(data: {searchList: string[], count: number, options?: any}) {
+    let {searchList, count, options} = data;
+    return await this.nodeManager.findNOnline(searchList, count, options)
   }
 
   @ipcMethod(IpcMethods.GetNodeMultiAddress)
@@ -401,11 +360,11 @@ class NetworkIpcHandler extends CallablePlugin {
   async __sendToAggregatorNode(data: {type: string, data: any}): Promise<string[]> {
     let aggregators = this.network.configs.net.nodes?.aggregators || []
     if(aggregators.length > 0) {
-      const aggregatorsInfo = this.collateralPlugin.filterNodes({list: aggregators});
+      const aggregatorsInfo = this.nodeManager.filterNodes({list: aggregators});
       let responses: (MuonNodeInfo|null)[] = await Promise.all(
         aggregatorsInfo.map(n => {
           if(n.wallet === process.env.SIGN_WALLET_ADDRESS) {
-            return this.__aggregateData(data, this.collateralPlugin.currentNodeInfo!)
+            return this.__aggregateData(data, this.nodeManager.currentNodeInfo!)
               .then(() => n)
               .catch(e => {
                 log.error("SendToAggregatorNode:ex, %O", e);
@@ -437,6 +396,22 @@ class NetworkIpcHandler extends CallablePlugin {
     return []
   }
 
+  @ipcMethod(IpcMethods.AddContextToLatencyCheck)
+  async __addContextToLatencyCheck(context: AppContext) {
+    return this.latencyCheckPlugin.initAppContext(context);
+  }
+
+  @ipcMethod(IpcMethods.GetAppLatency)
+  async __getAppLatency(data: {appId: string, seed: string}) {
+    const {appId, seed} = data;
+    return this.latencyCheckPlugin.getAppLatency(appId, seed)
+  }
+
+  @ipcMethod(IpcMethods.IsNodeOnline)
+  async __isNodeOnline(node: string) {
+    return this.nodeManager.isNodeOnline(node);
+  }
+
   /** ==================== remote methods ===========================*/
 
 
@@ -454,8 +429,8 @@ class NetworkIpcHandler extends CallablePlugin {
    * @returns {Promise<*>}
    * @private
    */
-  @remoteMethod(RemoteMethods.ExecIpcRemoteCall)
-  async __onIpcRemoteCallExec(data, callerInfo) {
+  @remoteMethod(RemoteMethods.ExecCoreRemoteCall)
+  async __execCoreRemoteCall(data, callerInfo) {
     let taskId, options: IpcCallOptions = {};
     if (data?.options?.taskId) {
       taskId = data?.options.taskId;
@@ -467,29 +442,47 @@ class NetworkIpcHandler extends CallablePlugin {
       }
     }
     // @ts-ignore
-    return await CoreIpc.forwardRemoteCall(data, _.omit(callerInfo, ['peer']), options);
+    return await CoreIpc.execRemoteCall(data, _.omit(callerInfo, ['peer']), options);
   }
 
   @remoteMethod(RemoteMethods.ForwardGateWayRequest)
   async __rcForwardGatewayRequest(requestData: GatewayCallParams, callerInfo, options:{timeout?: number}={}) {
     let {app} = requestData
 
-    const currentNode: MuonNodeInfo = this.collateralPlugin.currentNodeInfo!;
+    const currentNode: MuonNodeInfo|undefined = this.nodeManager.currentNodeInfo;
+
+    /** If current node is not in the network */
+    if(!currentNode) {
+      const deployers:string[] = this.nodeManager.filterNodes({isDeployer: true}).map(n => n.id);
+      const onlineList: string[] = await this.nodeManager.findNOnline(
+        _.shuffle(deployers).slice(0, Math.ceil(deployers.length/2)),
+        1,
+        {timeout: 2000},
+      )
+      if(onlineList.length <= 0)
+        throw `no online deployer to forward the request`;
+      return this.forwardGatewayCallToOtherNode(onlineList[0], requestData, options.timeout);
+    }
+
     const context: AppContext|undefined = await CoreIpc.getAppOldestContext(app);
     if(context) {
+      let partners = context.party.partners;
+      if(!!context.keyGenRequest?.data?.init?.shareProofs) {
+        partners = Object.keys(context.keyGenRequest?.data?.init?.shareProofs);
+      }
       /** When the context exists, the node can either process it or send it to the appropriate node. */
-      if(context.party.partners.includes(currentNode.id)) {
+      if(partners.includes(currentNode.id)) {
         /** Process the request */
         return await requestQueue.send(requestData)
       }
       else {
         /** Forward request to the appropriate node. */
-        const randomIndex = Math.floor(Math.random() * context.party.partners.length);
-        return this.forwardGatewayCallToOtherNode(
-          context.party.partners[randomIndex],
-          requestData,
-          options.timeout,
-        )
+        const candidatePartners = _.shuffle(partners).slice(0, Math.ceil(partners.length/2));
+        /** find an online node that has the app's tss key */
+        const availables: string[] = await CoreIpc.findNAvailablePartners(context.appId, context.seed, candidatePartners, 1);
+        if(availables.length <= 0)
+          throw "The request cannot be forwarded because there is no available partner";
+        return this.forwardGatewayCallToOtherNode(availables[0], requestData, options.timeout);
       }
     }
     else {
@@ -505,13 +498,8 @@ class NetworkIpcHandler extends CallablePlugin {
          If a non-deployer node does not have a context, it should send the request to one of the deployer nodes.
          The deployer nodes know the members of the app party and can forward the request to the suitable one.
          */
-        let deployers: string[] = this.collateralPlugin.filterNodes({isDeployer: true}).map(({id}) => id);
-        const randomIndex = Math.floor(Math.random() * deployers.length);
-        return this.forwardGatewayCallToOtherNode(
-          deployers[randomIndex],
-          requestData,
-          options.timeout,
-        )
+        let deployers: string[] = this.nodeManager.filterNodes({isDeployer: true}).map(({id}) => id);
+        return this.forwardGatewayRequestToOnlinePartner(deployers, requestData, options.timeout);
       }
     }
   }
@@ -525,16 +513,16 @@ class NetworkIpcHandler extends CallablePlugin {
         if(!appName)
           throw 'invalid request'
         /** forward request into core to be verified and then be stored */
-        
+
         // TODO: Uncomment this
         // Just deployer nodes have access to all appContexts
         // at the momemnt and monitoring nodes can't verify
         // the transactions.
         // It should be changed to let all nodes query the AppContext w/o
         // the party and get the TSS pubkey and verify the requests
-        
+
         //const verified = await CoreIpc.verifyRequestSignature(data.data)
-        
+
         //if(!verified)
         //  throw 'request not verified';
         if(reqAggregatorBus) {

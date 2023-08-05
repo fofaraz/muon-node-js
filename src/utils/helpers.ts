@@ -1,8 +1,6 @@
 import fs from 'fs'
 import readline from 'readline'
-import BigNumber from 'bignumber.js'
-BigNumber.set({DECIMAL_PLACES: 26})
-import Web3 from 'web3'
+import numberToBN from  'number-to-bn'
 import axios from 'axios';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
@@ -13,7 +11,10 @@ import {promisify} from 'util'
 import childProcess from 'node:child_process'
 import {isIP} from 'net'
 import isIpPrivate from 'private-ip'
-const toBN = Web3.utils.toBN;
+import {loadGlobalConfigs} from "../common/configurations.js";
+import BN from "bn.js";
+
+
 const exec = promisify(childProcess.exec);
 
 export const timeout = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -22,16 +23,27 @@ export const uuid = () => {
   return Date.now().toString(32) + Math.floor(Math.random()*999999999).toString(32);
 }
 export const sortObject = o => Object.keys(o).sort().reduce((r, k) => (r[k] = o[k], r), {})
-export const floatToBN = (num, decimals) => {
-  let n0 = new BigNumber(num).multipliedBy(`1e${decimals}`);
-  let n1 = n0.decimalPlaces(decimals).integerValue();
-  return toBN(`0x${n1.toString(16)}`);
+
+export const floatToBN = (floatNumber, decimals) => {
+  const floatString = floatNumber.toString();
+  const [integerPart, decimalPart = ''] = floatString.split('.');
+  let bnValue = new BN(integerPart);
+  const decimalPartTruncated = decimalPart.slice(0, decimals);
+  const paddingZeros = '0'.repeat(decimals - decimalPartTruncated.length);
+  const decimalPartCombined = decimalPartTruncated + paddingZeros;
+  const decimalBN = new BN(decimalPartCombined);
+  bnValue = bnValue.mul(new BN(10).pow(new BN(decimals))).add(decimalBN);
+  return toBN(bnValue.toString());
 }
+
+
 export const parseBool = v => {
   if(typeof v === 'string')
     v = v.toLowerCase();
   return v === '1' || v==='true' || v === true || v === 1;
 }
+
+
 
 export const flattenObject = (obj, prefix="") => {
   let result = {}
@@ -122,31 +134,31 @@ export function pub2json(pubkey: PublicKey, minimal: boolean=false): JsonPublicK
 }
 
 export async function findMyIp(): Promise<string> {
+
   const checkValidIp = str => {
     if(!isIP(str))
       throw `input is not ip`
     if(isIpPrivate(str))
       throw `input is private ip`
     return str
-  }
+  };
+
+  const envIp = process.env.PUBLIC_IP;
+  if (envIp)
+    return envIp!;
+
+  let configs = loadGlobalConfigs('net.conf.json', 'default.net.conf.json');
+  let ifconfigURLs = configs.routing.ifconfig;
   // @ts-ignore
-  let ip = await Promise.any([
-    axios.get('https://ifconfig.me/all.json')
-      .then(({data}) => data.ip_addr)
-      .then(checkValidIp),
-    axios.get('https://ipinfo.io/ip', {responseType: "text"})
-      .then(({data}) => data)
-      .then(checkValidIp),
-    axios.get('http://api.ipify.org/', {responseType: "text"})
-      .then(({data}) => data)
-      .then(checkValidIp),
-    axios.get('https://ident.me/', {responseType: "text"})
-      .then(({data}) => data)
-      .then(checkValidIp),
-    axios.get('https://ipecho.net/plain', {responseType: "text"})
-      .then(({data}) => data)
-      .then(checkValidIp),
-  ])
+  let ip = await Promise.any(ifconfigURLs.map(ifconfigURL => {
+      return axios.get(ifconfigURL)
+        .then(({data}) => {
+          return data.ip_addr;
+        })
+        .then(checkValidIp)
+    })
+  );
+
   return ip;
 }
 
@@ -159,4 +171,13 @@ export async function getCommitId(): Promise<string> {
 
 export function statusCodeToTitle(code: number): AppDeploymentStatus {
   return ["NEW", "TSS_GROUP_SELECTED", "DEPLOYED", "PENDING", "EXPIRED"][code] as AppDeploymentStatus;
+}
+
+export function toBN(number) {
+  try {
+    return numberToBN.apply(null, arguments);
+  }
+  catch (e) {
+    throw new Error(e + ' Given value: "' + number + '"');
+  }
 }

@@ -1,24 +1,22 @@
 import CallablePlugin from './callable-plugin.js'
 import Request from '../../../common/db-models/Request.js'
-import {getTimestamp, pub2json, timeout} from '../../../utils/helpers.js'
+import {getTimestamp, pub2json} from '../../../utils/helpers.js'
 import * as crypto from '../../../utils/crypto.js'
-import {muonSha3, soliditySha3} from '../../../utils/sha3.js'
-import * as tss from '../../../utils/tss/index.js'
-import Web3 from 'web3'
+import {muonSha3} from '../../../utils/sha3.js'
+import * as TssModule from '../../../utils/tss/index.js'
 import lodash from 'lodash'
 import AppRequestManager from './app-request-manager.js'
 import {remoteApp, remoteMethod, gatewayMethod} from './app-decorators.js'
 import MemoryPlugin, {MemWriteOptions} from '../memory-plugin.js'
 import { isArrowFn, deepFreeze } from '../../../utils/helpers.js'
-import DistributedKey from "../../../utils/tss/distributed-key.js";
-import TssPlugin from "../tss-plugin.js";
+import AppTssKey from "../../../utils/tss/app-tss-key.js";
+import KeyManager from "../key-manager.js";
 import AppManager from "../app-manager.js";
 import TssParty from "../../../utils/tss/party.js";
-import CollateralInfoPlugin from "../collateral-info.js";
-import {AppContext, AppRequest, JsonPublicKey, MuonNodeInfo, MuonSignature} from "../../../common/types";
+import NodeManagerPlugin from "../node-manager.js";
+import {AppContext, AppRequest, MuonNodeInfo} from "../../../common/types";
 import {useOneTime} from "../../../utils/tss/use-one-time.js";
 import chalk from 'chalk'
-import Ajv from "ajv"
 import {logger} from '@libp2p/logger'
 import {bn2hex} from "../../../utils/tss/utils.js";
 import * as NetworkIpc from "../../../network/ipc.js";
@@ -27,44 +25,19 @@ import {RedisCache} from "../../../common/redis-cache.js";
 import axios from "axios";
 import {GatewayCallParams} from "../../../gateway/types";
 import {MapOf} from "../../../common/mpc/types";
+import {splitSignature, stringifySignature} from "../../../utils/tss/index.js";
+import {reportInsufficientPartners} from "../../../common/analitics-reporter.js";
+import {createAjv} from "../../../common/ajv.js";
+import ethSigUtil from '@metamask/eth-sig-util'
 
-const {shuffle} = lodash;
 const { omit } = lodash;
-const {utils: {toBN}} = Web3
-const ajv = new Ajv()
-const web3 = new Web3();
+
+const ajv = createAjv();
 const clone = (obj) => JSON.parse(JSON.stringify(obj))
 const requestConfirmationCache: RedisCache = new RedisCache('req-confirm')
 
-export type AppRequestSignature = {
-  /**
-   * Request hash
-   */
-  request: string,
-  /**
-   * Ethereum address of collateral wallet
-   */
-  owner: string,
-  /**
-   * Public key of nodes TSS shared
-   */
-  pubKey: string,
-  /**
-   * request timestamp
-   */
-  timestamp: number,
-  /**
-   * result of request
-   */
-  result: any,
-  /**
-   * Schnorr signature of request, signed by TSS share
-   */
-  signature: string
-}
-
 const RemoteMethods = {
-  WantSign: 'wantSign',
+  AskSignature: 'AskSign',
   InformRequestConfirmation: 'InformReqConfirmation',
 }
 
@@ -138,22 +111,22 @@ class BaseAppPlugin extends CallablePlugin {
 
     /** load app party on start */
     await this.appManager.waitToLoad();
-    await this.collateralPlugin.waitToLoad();
+    await this.nodeManager.waitToLoad();
 
     for(const seed of this.appManager.getAppSeeds(this.APP_ID)) {
-      const appParty = this.tssPlugin.getAppParty(this.APP_ID, seed);
+      const appParty = this.keyManager.getAppParty(this.APP_ID, seed);
       if(appParty) {
         this.log(`App party loaded %s`, appParty.id)
       }
     }
   }
 
-  get tssPlugin(): TssPlugin{
-    return this.muon.getPlugin('tss-plugin');
+  get keyManager(): KeyManager{
+    return this.muon.getPlugin('key-manager');
   }
 
-  get collateralPlugin(): CollateralInfoPlugin{
-    return this.muon.getPlugin('collateral');
+  get nodeManager(): NodeManagerPlugin{
+    return this.muon.getPlugin('node-manager');
   }
 
   get appManager(): AppManager {
@@ -176,11 +149,11 @@ class BaseAppPlugin extends CallablePlugin {
   }
 
   private getParty(seed: string): TssParty | null | undefined {
-    return this.tssPlugin.getAppParty(this.APP_ID, seed);
+    return this.keyManager.getAppParty(this.APP_ID, seed);
   }
 
-  private getTss(seed: string): DistributedKey | null {
-    return this.tssPlugin.getAppTssKey(this.APP_ID, seed)
+  private getTss(seed: string): AppTssKey | null {
+    return this.keyManager.getAppTssKey(this.APP_ID, seed)
   }
 
   /**
@@ -193,17 +166,27 @@ class BaseAppPlugin extends CallablePlugin {
     return this.REMOTE_CALL_TIMEOUT * 2 + 5000;
   }
 
+  private resultChecking(result) {
+    /** Serialization and deserialization must work on the request result. */
+    try {
+      JSON.parse(JSON.stringify(result))
+    }
+    catch (e) {
+      throw `App result serialize/deserialize error: ${e.message}`;
+    }
+  }
+
   @gatewayMethod("default")
-  async __onRequestArrived(callParams: GatewayCallParams) {
+  async __defaultRequestHandler(callParams: GatewayCallParams) {
     const {method, params, mode, callId: gatewayCallId, gwSign, fee: feeParams} = callParams;
 
-    this.log(`request arrived %O`, {method, params})
+    this.log(`request arrived %o`, {method, params})
     let t0 = Date.now()
     let startedAt = getTimestamp()
     let deploymentSeed;
 
     if(this.APP_ID === '1') {
-      if (!this.tssPlugin.isReady)
+      if (!this.keyManager.isReady)
         throw {message: "Deployment tss is not initialized"}
       /**
        deployer list load's from contract and has'nt deployment request and seed.
@@ -216,8 +199,7 @@ class BaseAppPlugin extends CallablePlugin {
         throw `App not deployed`;
       const oldestContext: AppContext = this.appManager.getAppOldestContext(this.APP_ID)!
       if(!this.appManager.appHasTssKey(this.APP_ID, oldestContext.seed)) {
-        await this.tssPlugin.checkAppTssKeyRecovery(this.APP_ID, oldestContext.seed);
-        throw `App tss not initialized`
+        throw `App tss not initialized currentNode: ${process.env.SIGN_WALLET_ADDRESS} seed: ${oldestContext.seed}`
       }
       deploymentSeed = oldestContext.seed;
     }
@@ -270,6 +252,7 @@ class BaseAppPlugin extends CallablePlugin {
         await this.validateRequest(clone(newRequest))
       }
       let result = await this.onRequest(clone(newRequest))
+      this.resultChecking(result)
       newRequest.data.result = result
       return omit(newRequest._doc, ['__v'])
     }
@@ -277,34 +260,6 @@ class BaseAppPlugin extends CallablePlugin {
     else{
       let t0 = Date.now(), t1, t2, t3, t4, t5, t6;
       let appParty = this.getParty(deploymentSeed)!;
-      /** find available partners to sign the request */
-      const availablePartners = await this.appManager.findOptimalAvailablePartners(
-        this.APP_ID,
-        deploymentSeed,
-        Math.min(
-          Math.ceil(appParty.t*1.5),
-          appParty.partners.length,
-        ),
-      );
-      // const availablePartners: string[] = await this.appManager.findNAvailablePartners(
-      //   this.APP_ID,
-      //   appParty.partners,
-      //   Math.min(
-      //     Math.ceil(appParty.t*1.5),
-      //     appParty.partners.length,
-      //   ),
-      //   {timeout: 5000}
-      // );
-      // let count = Math.min(
-      //   Math.ceil(appParty.t*1.5),
-      //   appParty.partners.length,
-      // );
-      // const availablePartners = shuffle(appParty.partners).slice(0, count-1);
-
-      t1 = Date.now();
-      this.log(`partners:[%o] are available to sign the request`, availablePartners)
-      if(availablePartners.length < appParty.t)
-        throw `Insufficient partner to sign the request, needs ${appParty.t} but only ${availablePartners.length} are available`
 
       if(this.validateRequest){
         this.log(`calling validateRequest ...`)
@@ -327,12 +282,13 @@ class BaseAppPlugin extends CallablePlugin {
       let result;
       try {
         result = await this.onRequest(clone(newRequest))
+        this.resultChecking(result)
       }
       catch (e) {
         this.log.error("error calling onRequest %O", e)
         throw e;
       }
-      this.log(`app result: %O`, result)
+      this.log(`app result: %o`, result)
       newRequest.data.result = result
 
       let resultHash;
@@ -353,6 +309,26 @@ class BaseAppPlugin extends CallablePlugin {
       else {
         this.requestManager.addRequest(newRequest, {requestTimeout: this.requestTimeout});
 
+        /** find available partners to sign the request */
+        const availableCount = Math.min(
+          Math.ceil(appParty.t*1.5),
+          appParty.partners.length,
+        );
+        const {availables: availablePartners, minGraph, graph} = await this.appManager.findOptimalAvailablePartners(
+          this.APP_ID,
+          deploymentSeed,
+          availableCount,
+        );
+
+        t1 = Date.now();
+        this.log(`partners:[%o] are available to sign the request`, availablePartners)
+        if(availablePartners.length < appParty.t) {
+          /** send analytic data to server */
+          reportInsufficientPartners({graph, minGraph, count: availableCount})
+            .catch(e => this.log.error(`error reporting insufficient partners %o`, e))
+          throw `Insufficient partner to sign the request, needs ${appParty.t} but only ${availablePartners.length} are available`
+        }
+
         t2 = Date.now()
         newRequest.data.init = {
           ... newRequest.data.init,
@@ -362,8 +338,8 @@ class BaseAppPlugin extends CallablePlugin {
 
         // await newRequest.save()
 
-        let sign = await this.makeSignature(newRequest, result, resultHash)
-        this.requestManager.addSignature(newRequest.reqId, sign.owner, sign);
+        let sign: string = await this.makeSignature(newRequest, result, resultHash)
+        this.requestManager.addSignature(newRequest.reqId, process.env.SIGN_WALLET_ADDRESS!, sign);
         // new Signature(sign).save()
 
         const fee = await this.spendRequestFee(newRequest);
@@ -383,11 +359,11 @@ class BaseAppPlugin extends CallablePlugin {
       this.log(`confirmation done with %s`, confirmed)
       t5 = Date.now()
 
-      let nonce = await this.tssPlugin.getSharedKey(`nonce-${newRequest.reqId}`, 15000)
+      let nonce: AppTssKey = await this.keyManager.getSharedKey(`nonce-${newRequest.reqId}`, 15000)
       this.log(`request signed with %o`, nonce.partners);
-      this.log('request time parts %O',{
-        "find online nodes": t1-t0,
-        "req exec time": t2-t1,
+      this.log('request time parts %o',{
+        "req exec time": t1-t0,
+        "find online nodes": t2-t1,
         "dkg time": t3-t2,
         "req broadcast": t4-t3,
         "confirm waiting": t5-t4,
@@ -446,20 +422,33 @@ class BaseAppPlugin extends CallablePlugin {
     if(fee && feeConfigs) {
       this.log(`spending fee %o`, fee)
       const {spender} = fee;
+      spender.address = spender.address.toLowerCase();
       const appId = this.APP_ID;
 
       /** fee signature is valid for 5 minutes */
-      if(spender.timestamp/1000 < request.data.timestamp-5*60e3)
+      if(spender.timestamp/1000 < request.data.timestamp-5*60)
         throw `fee spend time has been expired.`
 
-      const hash = muonSha3(
-        {t: "address", v: spender.address},
-        {t: 'uint64', v: spender.timestamp},
-        {t: 'uint256', v: appId},
-      )
-      const signer = crypto.recover(hash, spender.signature);
+      const eip712TypedData = {
+        types: {
+          EIP712Domain: [{name: 'name', type: 'string'}],
+          Message: [
+            {type: 'address', name: 'address'},
+            {type: 'uint64', name: 'timestamp'},
+            {type: 'uint256', name: 'appId'},
+          ]
+        },
+        domain: {name: 'Muonize'},
+        primaryType: 'Message',
+        message: {address: spender.address, timestamp: spender.timestamp, appId}
+      };
+
+      // @ts-ignore
+      let signer = ethSigUtil.recoverTypedSignature({data: eip712TypedData, signature: spender.signature, version: "V4"});
+
+      signer = signer.toLowerCase();
       if(signer !== spender.address)
-        throw `fee spender not matched with signer.`
+        throw `fee spender not matched with signer.`;
 
       /** spend fee */
       const {endpoint, signers: feeSigners} = feeConfigs
@@ -498,7 +487,7 @@ class BaseAppPlugin extends CallablePlugin {
   async informRequestConfirmation(request: AppRequest) {
     request = clone(request)
     // await this.onConfirm(request)
-    let nonce: DistributedKey = await this.tssPlugin.getSharedKey(`nonce-${request.reqId}`)!;
+    let nonce: AppTssKey = await this.keyManager.getSharedKey(`nonce-${request.reqId}`)!;
 
     let announceList = this.getParty(request.deploymentSeed)!.partners;
     if(!!this.getConfirmAnnounceGroups) {
@@ -516,7 +505,7 @@ class BaseAppPlugin extends CallablePlugin {
       }
     }
 
-    const partners: MuonNodeInfo[] = this.collateralPlugin.filterNodes({list: announceList})
+    const partners: MuonNodeInfo[] = this.nodeManager.filterNodes({list: announceList})
     this.log(`nodes selected to announce confirmation: %o`, partners.map(p => p.id))
 
     const responses: string[] = await Promise.all(partners.map(async node => {
@@ -546,18 +535,17 @@ class BaseAppPlugin extends CallablePlugin {
   }
 
   calculateRequestId(request, resultHash) {
-    return crypto.soliditySha3([
+    return muonSha3(
       {type: "address", value: request.gwAddress},
-      {type: "uint256", value: crypto.soliditySha3(request.data.uid)},
+      {type: "uint256", value: muonSha3(request.data.uid)},
       {type: "uint32", value: request.data.timestamp},
       {type: "uint256", value: request.appId},
-      {type: "string", value: crypto.soliditySha3(request.method)},
+      {type: "string", value: muonSha3(request.method)},
       {type: "uint256", value: resultHash},
-    ]);
+    );
   }
 
   async onFirstNodeRequestSucceed(request: AppRequest, availablePartners: string[]) {
-    let tssPlugin = this.muon.getPlugin(`tss-plugin`)
     const seed = request.deploymentSeed;
 
     if(!this.getTss(seed)){
@@ -570,17 +558,16 @@ class BaseAppPlugin extends CallablePlugin {
 
     let nonceParticipantsCount = Math.ceil(party.t * 1.2)
     this.log(`generating nonce with ${nonceParticipantsCount} partners.`)
-    let nonce = await tssPlugin.keyGen({appId: this.APP_ID, seed}, {
+    let nonce = await this.keyManager.keyGen({appId: this.APP_ID, seed}, {
       id: `nonce-${request.reqId}`,
       partners: availablePartners,
       maxPartners: nonceParticipantsCount
     })
-    this.log(`nonce generation has ben completed with address %s.`, tss.pub2addr(nonce.publicKey))
+    this.log(`nonce generation has ben completed with address %s.`, TssModule.pub2addr(nonce.publicKey))
 
-    // let sign = tssPlugin.sign(null, party);
+    // let sign = this.keyManager.sign(null, party);
     return {
-      // noncePub: nonce.publicKey.encode('hex'),
-      nonceAddress: tss.pub2addr(nonce.publicKey),
+      nonceAddress: TssModule.pub2addr(nonce.publicKey),
     }
   }
 
@@ -615,23 +602,20 @@ class BaseAppPlugin extends CallablePlugin {
     let owners = Object.keys(signers)
     let allSignatures = owners.map(w => signers[w]);
 
-    let schnorrSigns = allSignatures.map(({signature}) => {
-      let [s, e] = signature.split(',').map(toBN);
-      return {s, e};
-    })
+    let schnorrSigns = allSignatures.map(signature => splitSignature(signature))
 
-    const ownersIndex = owners.map(wallet => this.collateralPlugin.getNodeInfo(wallet)!.id);
-    let aggregatedSign = tss.schnorrAggregateSigs(party!.t, schnorrSigns, ownersIndex)
+    const ownersIndex = owners.map(wallet => this.nodeManager.getNodeInfo(wallet)!.id);
+    let aggregatedSign = TssModule.schnorrAggregateSigs(party!.t, schnorrSigns, ownersIndex)
     let resultHash = this.hashAppSignParams(newRequest, newRequest.data.signParams, false)
 
     // TODO: check more combination of signatures. some time one combination not verified bot other combination does.
-    let confirmed = tss.schnorrVerify(verifyingPubKey, resultHash, aggregatedSign)
+    let confirmed = TssModule.schnorrVerify(verifyingPubKey, resultHash, aggregatedSign)
     // TODO: check and detect nodes misbehavior if request not confirmed
 
     return [
       confirmed,
       confirmed ? [{
-        owner: tss.pub2addr(verifyingPubKey),
+        owner: TssModule.pub2addr(verifyingPubKey),
         ownerPubKey: pub2json(verifyingPubKey, true),
         // signers: signersIndices,
         signature: bn2hex(aggregatedSign.s),
@@ -643,33 +627,30 @@ class BaseAppPlugin extends CallablePlugin {
     ]
   }
 
-  async recoverSignature(request, sign) {
+  async recoverSignature(request: AppRequest, owner: string, signature: string) {
     let tt0 = Date.now();
-    let {owner, pubKey: pubKeyStr} = sign;
-    let pubKey = tss.keyFromPublic(pubKeyStr);
+    const appTssKey = this.getTss(request.deploymentSeed)!
     // TODO: need to recheck
-    // if(owner !== tss.pub2addr(pubKey)) {
+    // if(owner !== TssModule.pub2addr(pubKey)) {
     //   console.log({owner, pubKeyStr,})
     //   throw {message: 'Sign recovery error: invalid pubKey address'}
     // }
 
-    let [s, e] = sign.signature.split(',').map(toBN)
-    // let sig = {s, e}
+    let {s, e} = splitSignature(signature)
     //
-    let tssPlugin = this.muon.getPlugin('tss-plugin');
-    let nonce = await tssPlugin.getSharedKey(`nonce-${request.reqId}`)
+    let nonce: AppTssKey = await this.keyManager.getSharedKey(`nonce-${request.reqId}`)
 
-    const ownerInfo = this.collateralPlugin.getNodeInfo(owner)
+    const ownerInfo = this.nodeManager.getNodeInfo(owner)
     if(!ownerInfo){
       this.log(`invalid signature owner %s`, owner)
       return false
     }
-    let Z_i = pubKey;
+    let Z_i = appTssKey.getPubKey(ownerInfo!.id);
     let K_i = nonce.getPubKey(ownerInfo!.id);
 
-    const eInv = e.invm(tss.curve.n!)
-    let p1 = tss.pointAdd(K_i, Z_i.mul(eInv)).encode('hex', true)
-    let p2 = tss.curve.g.multiply(s).encode("hex", true);
+    const eInv = e.invm(TssModule.curve.n!)
+    let p1 = TssModule.pointAdd(K_i, Z_i.mul(eInv)).encode('hex', true)
+    let p2 = TssModule.curve.g.multiply(s).encode("hex", true);
     return p1 === p2 ? owner : null;
   }
 
@@ -679,19 +660,18 @@ class BaseAppPlugin extends CallablePlugin {
       throw `app[${this.APP_NAME}] tss publicKey not found`
     // @ts-ignore
     for(const publicKey of Object.values(signingPubKey)) {
-      if(tss.schnorrVerifyWithNonceAddress(hash, signature, nonceAddress, publicKey))
+      if(TssModule.schnorrVerifyWithNonceAddress(hash, signature, nonceAddress, publicKey))
         return true;
     }
     return false
   }
 
   async broadcastNewRequest(request: AppRequest) {
-    let tssPlugin = this.muon.getPlugin('tss-plugin');
-    let nonce: DistributedKey = await tssPlugin.getSharedKey(`nonce-${request.reqId}`, 15000)
+    let nonce: AppTssKey = await this.keyManager.getSharedKey(`nonce-${request.reqId}`, 15000)
     let party = this.getParty(request.deploymentSeed);
     if(!party)
       throw {message: `${this.ConstructorName}.broadcastNewRequest: app party has not value.`}
-    let partners: MuonNodeInfo[] = this.collateralPlugin.filterNodes({list: party.partners})
+    let partners: MuonNodeInfo[] = this.nodeManager.filterNodes({list: party.partners})
       .filter((op: MuonNodeInfo) => {
         return op.wallet !== process.env.SIGN_WALLET_ADDRESS && nonce.partners.includes(op.id)
       })
@@ -702,14 +682,14 @@ class BaseAppPlugin extends CallablePlugin {
     partners.map(async node => {
       return this.remoteCall(
           node.peerId,
-          RemoteMethods.WantSign,
+          RemoteMethods.AskSignature,
           request,
           {
             timeout: this.REMOTE_CALL_TIMEOUT,
             taskId: `keygen-${nonce.id}`
           }
         )
-        .then(data => this.__onRemoteSignTheRequest(data, null, node))
+        .then(sign => this.__onRemoteSignTheRequest({reqId: request.reqId, sign}, null, node))
         .catch(e => {
           this.log.error('asking signature for request failed %O', e)
           return this.__onRemoteSignTheRequest(null, {
@@ -733,7 +713,7 @@ class BaseAppPlugin extends CallablePlugin {
       signParams = this.appendSecurityParams(request, signParams);
     }
     try {
-      return soliditySha3(signParams)
+      return muonSha3(...signParams)
     }
     catch (e) {
       const {message, ...otherProps} = e;
@@ -745,17 +725,14 @@ class BaseAppPlugin extends CallablePlugin {
     }
   }
 
-  async makeSignature(request: AppRequest, result: any, resultHash): Promise<AppRequestSignature> {
-    let signTimestamp = getTimestamp()
-    // let signature = crypto.sign(resultHash)
-
+  async makeSignature(request: AppRequest, result: any, resultHash): Promise<string> {
     let {reqId} = request;
-    let nonce: DistributedKey = await this.tssPlugin.getSharedKey(`nonce-${reqId}`, 15000)
+    let nonce: AppTssKey = await this.keyManager.getSharedKey(`nonce-${reqId}`, 15000)
     if(!nonce)
       throw `nonce not found for request ${reqId}`
 
-    // let tssKey = this.isBuiltInApp ? tssPlugin.tssKey : tssPlugin.getAppTssKey(this.APP_ID);
-    let tssKey: DistributedKey = this.getTss(request.deploymentSeed)!;
+    // let tssKey = this.isBuiltInApp ? this.keyManager.tssKey : this.keyManager.getAppTssKey(this.APP_ID);
+    let tssKey: AppTssKey = this.getTss(request.deploymentSeed)!;
     if(!tssKey)
       throw `App TSS key not found`;
 
@@ -770,25 +747,16 @@ class BaseAppPlugin extends CallablePlugin {
      */
     await useOneTime("key", K.encode('hex', true), `app-${this.APP_ID}-nonce-${resultHash}`, 3600)
     // TODO: remove nonce after sign
-    let signature = tss.schnorrSign(tssKey.share!, k_i!, K, resultHash)
+    let signature = TssModule.schnorrSign(tssKey.share!, tssKey.publicKey, k_i!, K, resultHash)
 
     if(!process.env.SIGN_WALLET_ADDRESS){
       throw {message: "process.env.SIGN_WALLET_ADDRESS is not defined"}
     }
 
-    return {
-      request: request.reqId,
-      // node stake wallet address
-      owner: process.env.SIGN_WALLET_ADDRESS,
-      // tss shared public key
-      pubKey: tssKey.sharePubKey!,
-      timestamp: signTimestamp,
-      result,
-      signature:`${bn2hex(signature.s)},${bn2hex(signature.e)}`
-    }
+    return stringifySignature(signature);
   }
 
-  async __onRemoteSignTheRequest(data: {sign: AppRequestSignature} | null, error, remoteNode: MuonNodeInfo) {
+  async __onRemoteSignTheRequest(data: {reqId: string, sign: string} | null, error, remoteNode: MuonNodeInfo) {
     if(error){
       this.log.error(`node ${remoteNode.id} unable to sign the request. %O`, error)
       let {request: reqId, ...otherParts} = error;
@@ -800,12 +768,12 @@ class BaseAppPlugin extends CallablePlugin {
     }
     try {
       this.log(`node ${remoteNode.id} signed the request.`)
-      let {sign} = data!;
+      let {reqId, sign} = data!;
       // let request = await Request.findOne({_id: sign.request})
-      let request = this.requestManager.getRequest(sign.request)
+      let request:AppRequest = this.requestManager.getRequest(reqId) as AppRequest
       if (request) {
         // TODO: check response similarity
-        // let signer = await this.recoverSignature(request, sign)
+        // let signer = await this.recoverSignature(request, remoteNode.wallet, sign)
         // if (signer && signer === sign.owner) {
           // @ts-ignore
           this.requestManager.addSignature(request.reqId, remoteNode.wallet, sign)
@@ -820,7 +788,7 @@ class BaseAppPlugin extends CallablePlugin {
         // }
       }
       else{
-        console.log(`BaseAppPlugin.__onRemoteSignTheRequest >> Request not found id:${sign.request}`)
+        console.log(`BaseAppPlugin.__onRemoteSignTheRequest >> Request not found id:${reqId}`)
       }
     }
     catch (e) {
@@ -876,6 +844,7 @@ class BaseAppPlugin extends CallablePlugin {
      * Check request result to be same.
      */
     let result = await this.onRequest(request)
+    this.resultChecking(result)
 
     const appSignParams = this.signParams(request, result)
     const resultHashWithoutSecurityParams = this.hashAppSignParams(request, appSignParams, false)
@@ -902,7 +871,7 @@ class BaseAppPlugin extends CallablePlugin {
    * @param _request
    */
   async verifyRequestSignature(_request: AppRequest): Promise<boolean> {
-    const request = clone(_request)
+    const request:AppRequest = clone(_request)
     deepFreeze(request);
 
     // const [result, hash] = await this.preProcessRemoteRequest(request);
@@ -919,17 +888,18 @@ class BaseAppPlugin extends CallablePlugin {
   }
 
   /**
-   * App will be run again and the result will be checked to be correct.
    * All signatures will be checked to be matched with the result.
    * @param request {AppRequest} - confirmed app request
    * @param validation {boolean} - if false, request validation will not be checked.
    */
-  async verifyCompletedRequest(request, validation:boolean=true): Promise<boolean> {
+  async verifyCompletedRequest(request: AppRequest, validation:boolean=true): Promise<boolean> {
+    const {result} = request.data;
 
-    const [result, hash] = await this.preProcessRemoteRequest(request, validation);
+    const signParams = this.signParams(request, result)
+    const hash = this.hashAppSignParams(request, signParams)
 
     for(let i=0 ; i<request.signatures.length ; i++) {
-      if(!await this.verify(hash, request.signatures[i].signature, request.data.init.nonceAddress)) {
+      if(!await this.verify(hash!, request.signatures[i].signature, request.data.init.nonceAddress)) {
         return false
       }
     }
@@ -937,15 +907,15 @@ class BaseAppPlugin extends CallablePlugin {
     return true;
   }
 
-  @remoteMethod(RemoteMethods.WantSign)
-  async __onRemoteWantSign(request: AppRequest, callerInfo) {
+  @remoteMethod(RemoteMethods.AskSignature)
+  async __askSignature(request: AppRequest, callerInfo) {
     this.log(`remote node [id:${callerInfo.id}] wants signature %o`, request)
     deepFreeze(request);
     /**
      * Check request owner
      */
     if(request.gwAddress !== callerInfo.wallet){
-      throw "Only request owner can want signature."
+      throw "Only request owner can ask signature."
     }
 
     /**
@@ -954,7 +924,7 @@ class BaseAppPlugin extends CallablePlugin {
     const context = this.appManager.getAppContext(this.APP_ID, request.deploymentSeed)
     if(!context)
       throw `Missing app context`
-    const currentNodeInfo = this.collateralPlugin.getNodeInfo(process.env.SIGN_WALLET_ADDRESS!)!
+    const currentNodeInfo = this.nodeManager.getNodeInfo(process.env.SIGN_WALLET_ADDRESS!)!
     if(!context.party.partners.includes(currentNodeInfo.id))
       throw `Current node does not exist in the app party`
     if(!this.getTss(request.deploymentSeed))
@@ -977,8 +947,7 @@ class BaseAppPlugin extends CallablePlugin {
       await useOneTime('fee', signature, request.reqId);
     }
 
-    let sign = await this.makeSignature(request, result, hash)
-    return { sign }
+    return this.makeSignature(request, result, hash)
   }
 
   @remoteMethod(RemoteMethods.InformRequestConfirmation)

@@ -7,12 +7,12 @@ import EthRpcList from './eth-rpc-list.js';
 const require = createRequire(import.meta.url);
 const ERC20_ABI =require('../data/ERC20-ABI.json')
 const ERC721_ABI = require('../data/ERC721-ABI.json')
+import {muonSha3} from './sha3.js'
+
 
 const HttpProvider = Web3.providers.HttpProvider
 const WebsocketProvider = Web3.providers.WebsocketProvider
 
-const _generalWeb3Instance = new Web3()
-const soliditySha3 = _generalWeb3Instance.utils.soliditySha3
 
 const lastUsedRpcIndex = {
 };
@@ -101,8 +101,27 @@ function hashCallOutput(
     value: !name || typeof result === 'string' ? result : result[name]
   }))
   params = [{ type: 'address', value: address }, ...params, ...extraParams]
-  let hash = _generalWeb3Instance.utils.soliditySha3(...params)
+  let hash = muonSha3(...params)
   return hash
+}
+
+const web3ProvidersSpecificErrors = [
+  'CONNECTION ERROR',
+  "Invalid JSON RPC response",
+  "invalid json response body",
+  "not authorized",
+  "we can't execute this request",
+  "Returned error:",
+  "Returned values aren't valid",
+].map(msg => msg.toLowerCase());
+
+function errorNeedRpcRotate(msg) {
+  msg = msg.toLowerCase();
+  for(const specificMsg of web3ProvidersSpecificErrors) {
+    if(specificMsg.includes(msg))
+      return true;
+  }
+  return false
 }
 
 async function wrappedCall(network, web3ApiCall, args=[]) {
@@ -110,15 +129,7 @@ async function wrappedCall(network, web3ApiCall, args=[]) {
     return await web3ApiCall(...args)
   }
   catch (e) {
-    let errorMessage = e.message;
-    if(
-      errorMessage.includes('CONNECTION ERROR')
-      || errorMessage.includes("Invalid JSON RPC response")
-      || errorMessage.includes("not authorized")
-      || errorMessage.includes("we can't execute this request")
-      || errorMessage.includes("Returned error: execution aborted")
-      || errorMessage.includes("Returned error: Internal error")
-    ) {
+    if(errorNeedRpcRotate(e.message) ) {
       const chainId = getNetworkId(network);
       console.log(`error on web3 call`, {chainId}, e.message)
       delete web3Instances[chainId];
@@ -148,11 +159,11 @@ function getNftInfo(address, network) {
 }
 
 function getTransaction(txHash, network) {
-  return getWeb3(network).then((web3) => wrappedCall(network, web3.eth.getTransaction, [txHash]))
+  return getWeb3(network).then((web3) => wrappedCall(network, web3.eth.getTransaction.bind(web3), [txHash]))
 }
 
 function getTransactionReceipt(txHash, network) {
-  return getWeb3(network).then((web3) => wrappedCall(network, web3.eth.getTransactionReceipt, [txHash]))
+  return getWeb3(network).then((web3) => wrappedCall(network, web3.eth.getTransactionReceipt.bind(web3), [txHash]))
 }
 
 function call(contractAddress, methodName, params, abi, network) {
@@ -162,29 +173,22 @@ function call(contractAddress, methodName, params, abi, network) {
   })
 }
 
-function read(contractAddress, property, params, abi, network) {
-  return getWeb3(network).then((web3) => {
-    let contract = new web3.eth.Contract(abi, contractAddress)
-    return wrappedCall(network, contract.methods[property].call, params)
-  })
-}
-
 function getBlock(network, blockHashOrBlockNumber) {
   return getWeb3(network).then((web3) => {
-    return wrappedCall(network, web3.eth.getBlock, [blockHashOrBlockNumber])
+    return wrappedCall(network, web3.eth.getBlock.bind(web3), [blockHashOrBlockNumber])
   })
 }
 
 function getBlockNumber(network) {
   return getWeb3(network).then((web3) => {
-    return wrappedCall(network, web3.eth.getBlockNumber)
+    return wrappedCall(network, web3.eth.getBlockNumber.bind(web3))
   })
 }
 
 function getPastEvents(network, contractAddress, abi, event, options) {
   return getWeb3(network).then((web3) => {
     let contract = new web3.eth.Contract(abi, contractAddress)
-    return wrappedCall(network, contract.getPastEvents, [event, options])
+    return wrappedCall(network, contract.getPastEvents.bind(contract), [event, options])
   })
 }
 
@@ -273,11 +277,9 @@ export {
   getPastEvents,
   getWeb3Sync,
   hashCallOutput,
-  soliditySha3,
   getTransaction,
   getTransactionReceipt,
   call,
-  read,
   subscribeLogEvent,
   getTokenInfo,
   getNftInfo

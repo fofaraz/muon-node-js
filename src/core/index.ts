@@ -123,7 +123,7 @@ function getGeneralApps(): MuonPlugin[] {
   return result;
 }
 
-var muon;
+var muon: Muon;
 
 async function start() {
   log("starting ...");
@@ -145,8 +145,8 @@ async function start() {
     muon = new Muon({
       plugins: [
         {
-          name: "collateral",
-          module: (await import("./plugins/collateral-info.js")).default,
+          name: "node-manager",
+          module: (await import("./plugins/node-manager.js")).default,
           config: {},
         },
         {
@@ -180,23 +180,13 @@ async function start() {
           config: {},
         },
         {
-          name: "content-verify",
-          module: (await import("./plugins/content-verify-plugin.js")).default,
-          config: {},
-        },
-        {
-          name: "content",
-          module: (await import("./plugins/content-app.js")).default,
-          config: {},
-        },
-        {
           name: "memory",
           module: (await import("./plugins/memory-plugin.js")).default,
           config: {},
         },
         {
-          name: "tss-plugin",
-          module: (await import("./plugins/tss-plugin.js")).default,
+          name: "key-manager",
+          module: (await import("./plugins/key-manager.js")).default,
           config: {},
         },
         {
@@ -224,19 +214,29 @@ async function start() {
           module: (await import("./plugins/mpc-network.js")).default,
           config: {},
         },
+        {
+          name: "db-synchronizer",
+          module: (await import("./plugins/db-synchronizer.js")).default,
+          config: {},
+        },
+        {
+          name: "reshare-cj",
+          module: (await import("./plugins/cron-jobs/reshare-cron-job.js")).default,
+          config: {},
+        },
         ...(await getEnvPlugins()),
         ...getCustomApps(),
         ...getGeneralApps(),
         ...getBuiltInApps(),
       ],
       net,
-      // TODO: pass it into the tss-plugin
+      // TODO: pass it into the key-manager
       tss,
     });
 
     await muon.initialize();
 
-    muon.start();
+    await muon.start();
   } catch (e) {
     console.error(e);
     throw e;

@@ -27,7 +27,7 @@ export default class RemoteCall extends BasePlugin {
    */
 
   call(peer, method, params, options={}){
-    return NetworkIpc.forwardRemoteCall(peer, method, params, options)
+    return NetworkIpc.forwardCoreRemoteCall(peer, method, params, options)
   }
 
   on(method, handler, options) {
@@ -38,6 +38,14 @@ export default class RemoteCall extends BasePlugin {
       })
     }
     // @ts-ignore
-    super.on(method, handler)
+    super.on(method, async (...args) => {
+      /** apply remote call middlewares */
+      if(options.middlewares && options.middlewares.length > 0){
+        for(const middleware of options.middlewares) {
+          await middleware(this.muon, ...args)
+        }
+      }
+      return handler(...args)
+    })
   }
 }

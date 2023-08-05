@@ -16,12 +16,25 @@
       "http://3.130.24.220:8080/delegate",
       "http://194.195.211.27:8080/delegate",
       "http://209.250.252.247:8080/delegate",
-      "http://95.217.20.127:8000/delegate"
-    ]
+      "http://188.166.73.132:8000/delegate"
+    ],
+    "ifconfig":[
+      "http://104.131.177.195:8080/ifconfig",
+      "http://3.130.24.220:8080/ifconfig",
+      "http://194.195.211.27:8080/ifconfig",
+      "http://209.250.252.247:8080/ifconfig",
+      "http://188.166.73.132:8000/ifconfig",
+      "https://ifconfig.muon.net/",
+      "https://ifconfig.me/all.json"
+    ],
+    "discoveryValidPeriod": 30000,
+    "findPeerValidPeriod": 30000,
+    "delegateRoutingTTL": 1200000,
+    "peerStoreTTL": 1200000
   },
   "nodes": {
-    "onlineList": "http://103.75.196.96/nodes",
-    "aggregators": ["4", "14012"]
+    "onlineList": "https://monitor1.muon.net/nodes",
+    "aggregators": ["4", "22408"]
   },
   "bootstrap": [
     "/ip4/104.131.177.195/tcp/5000/p2p/Qma3GsJmB47xYuyahPZPSadh1avvxfyYQwk8R3UnFrQ6aP",
@@ -30,9 +43,21 @@
     "/ip4/209.250.252.247/tcp/5000/p2p/QmbAGW4ddya254cAXKz2FnarpFv1odaJuisgCdPZrYfVxE"
   ],
   "fee": {
-    "endpoint": "http://70.34.217.65:3000/sign",
+    "endpoint": "http://fee.muon.net/sign",
     "signers": [
-      "0xdc8Df2877338c89Adb26a8b0A63Cf601B2E73184"
+      "0x968cB8308E052E9fDce45D1F8a384a9881e829A0"
     ]
+  },
+  "synchronizer": {
+    "monitor": {
+      "providers": [
+        "http://104.131.177.195:8080/network",
+        "http://3.130.24.220:8080/network",
+        "http://194.195.211.27:8080/network",
+        "http://209.250.252.247:8080/network"
+      ],
+      "startDelay": 120e3,
+      "interval": 3600e3
+    }
   }
 }

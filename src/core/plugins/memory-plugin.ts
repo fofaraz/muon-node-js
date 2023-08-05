@@ -27,11 +27,12 @@ import * as crypto from '../../utils/crypto.js'
 import {getTimestamp} from '../../utils/helpers.js'
 import Memory, {types as MemoryTypes} from '../../common/db-models/Memory.js'
 import { remoteApp, broadcastHandler } from './base/app-decorators.js'
-import CollateralInfoPlugin from "./collateral-info.js";
+import NodeManagerPlugin from "./node-manager.js";
 import { createClient, RedisClient } from 'redis'
 import redisConfig from '../../common/redis-config.js'
 import { promisify } from "util"
 import Web3 from 'web3'
+import {muonSha3} from '../../utils/sha3.js'
 
 export type MemWriteType = 'app' | 'node' | 'local'
 
@@ -110,7 +111,7 @@ class MemoryPlugin extends CallablePlugin {
   }
 
   checkSignature(memWrite: MemWrite){
-    let collateralPlugin: CollateralInfoPlugin = this.muon.getPlugin('collateral');
+    let nodeManager: NodeManagerPlugin = this.muon.getPlugin('node-manager');
 
     let {signatures} = memWrite;
 
@@ -120,24 +121,20 @@ class MemoryPlugin extends CallablePlugin {
       return false
     }
 
-    let allowedList = collateralPlugin.getAllowedWallets().map(addr => addr.toLowerCase());
-
     switch (memWrite.type) {
       case "app": {
-        if(signatures.length < collateralPlugin.TssThreshold)
+        if(signatures.length < this.netConfigs.tss.threshold)
           throw "Insufficient MemWrite signature";
         let sigOwners: string[] = signatures.map(sig => crypto.recover(hash, sig).toLowerCase())
-        console.log({sigOwners})
-        let ownerIsValid: number[] = sigOwners.map(owner => (allowedList.indexOf(owner) >= 0 ? 1 : 0))
-        let validCount: number = ownerIsValid.reduce((sum, curr) => (sum + curr), 0)
-        return validCount >= collateralPlugin.TssThreshold;
+        let validOwners: string[] = nodeManager.filterNodes({list: sigOwners}).map(n => n.id)
+        return validOwners.length >= this.netConfigs.tss.threshold;
       }
       case "node": {
         if(signatures.length !== 1){
           throw `Node MemWrite must have one signature. currently has ${signatures.length}.`;
         }
         const owner = crypto.recover(hash, signatures[0]).toLowerCase()
-        return allowedList.indexOf(owner) >= 0;
+        return !!nodeManager.getNodeInfo(owner);
       }
       default:
         throw `Unknown MemWrite type: ${memWrite.type}`
@@ -147,14 +144,14 @@ class MemoryPlugin extends CallablePlugin {
   hashMemWrite(memWrite: MemWrite) {
     let {type, owner, timestamp, ttl, nSign, data} = memWrite;
     let ownerIsWallet = type === MemoryTypes.Node;
-    return crypto.soliditySha3([
+    return muonSha3(
       {type: 'string', value: type},
       {type: ownerIsWallet ? 'address' : 'string', value: owner},
       {type: 'uint256', value: timestamp},
       {type: 'uint256', value: ttl},
       {type: 'uint256', value: nSign},
-      ... data.map(({type, value}) => ({type, value})),
-    ])
+      ... data.map(({type, value}) => ({type, value}))
+    )
   }
 
   /**
@@ -177,7 +174,7 @@ class MemoryPlugin extends CallablePlugin {
       hash: '',
       signatures: []
     }
-    memWrite.hash = this.hashMemWrite(memWrite)
+    memWrite.hash = this.hashMemWrite(memWrite)!;
     memWrite.signatures = [crypto.sign(memWrite.hash)]
 
     await this.storeMemWrite(memWrite);

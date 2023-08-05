@@ -1,11 +1,14 @@
 import Web3 from 'web3'
 import lodash from 'lodash'
 import BN from 'bn.js';
-
+import {toBN} from '../helpers.js';
+import jsSha3 from 'js-sha3'
+const {keccak_256: keccak256} = jsSha3;
 const {range} = lodash
-const {utils: {toBN, randomHex, sha3, soliditySha3, keccak256}} = Web3;
+const {utils: {randomHex, sha3}} = Web3;
 const ZERO = toBN(0)
 const ONE = toBN(1)
+
 
 function pub2addr(publicKey) {
   let pubKeyHex = publicKey.encode('hex').substr(2);
@@ -28,7 +31,7 @@ function toChecksumAddress(address) {
   return ret
 }
 
-function bn2hex(num: BN, byteLength: number=32): string {
+function bn2hex(num: BN, byteLength: number = 32): string {
   return '0x' + num.toBuffer('be', byteLength).toString('hex');
 }
 
@@ -37,7 +40,6 @@ export {
   toBN,
   bn2hex,
   sha3,
-  soliditySha3,
   keccak256,
   range,
   pub2addr,

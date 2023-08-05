@@ -4,9 +4,7 @@ import { CID } from "multiformats/cid";
 import PQueue from "p-queue";
 import defer from "p-defer";
 import errCode from "err-code";
-import anySignal from "any-signal";
 import type { PeerId } from "@libp2p/interface-peer-id";
-import type { AbortOptions } from "ipfs-core-types/src/utils";
 import type { PeerRouting } from "@libp2p/interface-peer-routing";
 import type { PeerInfo } from "@libp2p/interface-peer-info";
 import type { Startable } from "@libp2p/interfaces/startable";
@@ -16,6 +14,7 @@ import { parseBool, timeout } from "../utils/helpers.js";
 import * as crypto from "../utils/crypto.js";
 import { muonSha3 } from "../utils/sha3.js";
 import { isPrivate } from "./utils.js";
+import _ from 'lodash';
 
 const log = logger("muon:network:routing");
 
@@ -30,7 +29,7 @@ export type MuonRoutingInit = {
 
   /**
    Discovery interval.
-   
+
    Default: 300000 (every 5 minutes)
    */
   discoveryInterval?: number;
@@ -118,16 +117,16 @@ export class MuonRouting implements PeerRouting, Startable {
    */
   async findPeer(
     id: PeerId,
-    options: HTTPClientExtraOptions & AbortOptions = {}
+    options: any = {}
   ) {
     log("findPeer starts: %p", id);
 
     options.timeout = options.timeout ?? FINDPEER_DEFAULT_TIMEOUT;
-    options.signal = anySignal(
-      [this.abortController.signal].concat(
-        options.signal != null ? [options.signal] : []
-      )
-    );
+    // options.signal = anySignal(
+    //   [this.abortController.signal].concat(
+    //     options.signal != null ? [options.signal] : []
+    //   )
+    // );
 
     const onStart = defer();
     const onFinish = defer();
@@ -140,20 +139,41 @@ export class MuonRouting implements PeerRouting, Startable {
     try {
       await onStart.promise;
 
-      const randomIndex = Math.floor(Math.random() * this.apis.length);
-      log(
-        `Calling delegate server %o ...`,
-        this.apis[randomIndex].defaults.baseURL
+      const randomIndexs = _.shuffle(_.range(this.apis.length)).slice(0,2);
+      const apis = randomIndexs.map(i => this.apis[i])
+      log(`Calling delegate server %o ...`, apis.map(api => api.defaults.baseURL));
+
+      const timestamp = Date.now();
+      const hash = muonSha3(
+        {type: "uint64", value: timestamp},
+        {type: "string", value: `${this.components.peerId}`},
       );
-      let result = await this.apis[randomIndex]
-        .post(
-          "/findpeer",
-          { id: `${id}` },
-          {
-            timeout: options.timeout,
-          }
-        )
-        .then(({ data }) => data);
+
+      const findPeerData = {
+        signature: crypto.sign(hash),
+        timestamp: timestamp,
+        requesterId: this.components.peerId,
+        id: `${id}`
+      };
+
+      // @ts-ignore
+      let result = await Promise.any(
+        apis.map(api => {
+          return api.post(
+            "/findpeer",
+            findPeerData,
+            {
+              timeout: options.timeout,
+            }
+          )
+            .then(({data}) => {
+              if(!data?.peerInfo)
+                throw `Peer ${id} not found`
+              return data
+            })
+        })
+      )
+        .catch(e => ({}))
 
       log(`Delegate server response %O`, result);
       let info = result?.peerInfo;
@@ -180,12 +200,13 @@ export class MuonRouting implements PeerRouting, Startable {
   }
 
   /**
-   * Attempts to find the closest peers on the network
+   * Attempts to find the closest peers
+    on the network
    * to the given key.
    */
   async *getClosestPeers(
     key: Uint8Array,
-    options: HTTPClientExtraOptions & AbortOptions = {}
+    options: any = {}
   ) {
     yield* [];
   }
@@ -264,6 +285,8 @@ export class MuonRouting implements PeerRouting, Startable {
         log("Discovery responses: %o", responses);
       } catch (e) {
         log.error(`Discovery error: %O`, e);
+        await timeout(5000);
+        continue;
       }
 
       // randomize time of the next call

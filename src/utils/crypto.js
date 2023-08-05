@@ -1,33 +1,33 @@
-import ethers from 'ethers'
 import Web3 from 'web3'
 import {hashCallOutput} from './eth.js'
 import crypto from "crypto"
+import BN from "bn.js";
+import {muonSha3} from './sha3.js'
 
-const BN = Web3.utils.BN
-const web3 = new Web3();
-const PRIVATE_KEY = process.env.SIGN_WALLET_PRIVATE_KEY
-if(PRIVATE_KEY) {
-  const account = web3.eth.accounts.privateKeyToAccount(PRIVATE_KEY)
+
+
+const web3 = new Web3('http://localhost:8545');
+let PRIVATE_KEY = process.env.SIGN_WALLET_PRIVATE_KEY;
+if (PRIVATE_KEY) {
+  const account = web3.eth.accounts.privateKeyToAccount("0x" + PRIVATE_KEY)
   web3.eth.accounts.wallet.add(account)
 }
 
-function soliditySha3(params){
-  return web3.utils.soliditySha3(...params);
-}
-
 function sign(hash) {
-  let sig = web3.eth.accounts.sign(hash, PRIVATE_KEY)
+  let sig = web3.eth.accounts.sign(hash, "0x" + PRIVATE_KEY)
   return sig.signature;
 }
 
-function recover(hash, signature){
+export function signWithPrivateKey (hash, PK) {
+  let sig = web3.eth.accounts.sign(hash, "0x" + PK.replace("0x", ""))
+  return sig.signature;
+}
+
+function recover(hash, signature) {
   let signer = web3.eth.accounts.recover(hash, signature)
   return signer;
 }
 
-function toFixedHex(bigNum){
-  return ethers.utils.hexZeroPad('0x' + bigNum.toString(16), 32);
-}
 
 function isString(s) {
   return (typeof s === 'string' || s instanceof String)
@@ -54,12 +54,18 @@ function toBaseUnit(value, decimals) {
 
   // Split it into a whole and fractional part
   let comps = value.split('.');
-  if (comps.length > 2) { throw new Error('Too many decimal points'); }
+  if (comps.length > 2) {
+    throw new Error('Too many decimal points');
+  }
 
   let whole = comps[0], fraction = comps[1];
 
-  if (!whole) { whole = '0'; }
-  if (!fraction) { fraction = '0'; }
+  if (!whole) {
+    whole = '0';
+  }
+  if (!fraction) {
+    fraction = '0';
+  }
   if (fraction.length > decimals) {
     throw new Error('Too many decimal places');
   }
@@ -82,9 +88,9 @@ function toBaseUnit(value, decimals) {
 const AES_ENCRYPTION_ALGORITHM = "aes-256-gcm"
 
 export function aesCreateIv(random, privateKey) {
-  return web3.utils.soliditySha3(
-    {t: 'uint256', v: '0x'+privateKey},
-    {t: 'uint128', v: '0x'+random}
+  return muonSha3(
+    {t: 'uint256', v: '0x' + privateKey},
+    {t: 'uint128', v: '0x' + random}
   ).substr(2, 32)
 }
 
@@ -120,8 +126,6 @@ export function isAesEncrypted(cipher) {
 
 export {
   hashCallOutput,
-  toFixedHex,
-  soliditySha3,
   sign,
   recover,
   toBaseUnit,

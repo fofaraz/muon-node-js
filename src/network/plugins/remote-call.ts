@@ -4,7 +4,7 @@ import {fromString as uint8ArrayFromString} from 'uint8arrays/from-string'
 import {toString as uint8ArrayToString} from 'uint8arrays/to-string';
 import {uuid} from '../../utils/helpers.js'
 import TimeoutPromise from '../../common/timeout-promise.js'
-import CollateralInfoPlugin from "./collateral-info.js";
+import NodeManagerPlugin from "./node-manager.js";
 import {RemoteMethodOptions} from "../../common/types"
 import NodeCache from 'node-cache'
 import {peerId2Str} from "../utils.js";
@@ -72,10 +72,10 @@ class RemoteCall extends BaseNetworkPlugin {
   }
 
   async handleIncomingMessage(message, stream, peerId){
-    let collateralPlugin: CollateralInfoPlugin = this.network.getPlugin('collateral');
+    let nodeManager: NodeManagerPlugin = this.network.getPlugin('node-manager');
     try {
       message = message.toString()
-      let nodeInfo = collateralPlugin.getNodeInfo(peerId2Str(peerId))
+      let nodeInfo = nodeManager.getNodeInfo(peerId2Str(peerId))
       if(!nodeInfo){
         throw {message: `Unrecognized sender`}
       }
@@ -94,45 +94,19 @@ class RemoteCall extends BaseNetworkPlugin {
     }
   }
 
-  // async handler1 ({ connection, stream , ...otherOptions}) {
-  //   try {
-  //     let response;
-  //     await pipe(
-  //       stream,
-  //       async (source) => {
-  //         for await (const message of source) {
-  //           response = await this.handleIncomingMessage(uint8ArrayToString(message.subarray()), stream, connection.remotePeer)
-  //         }
-  //       }
-  //     )
-  //     if(response) {
-  //       await pipe(
-  //         [this.prepareSendData(response)],
-  //         stream
-  //       )
-  //     }
-  //     // stream.close();
-  //   } catch (err) {
-  //     console.error("network.RemoteCall.handler", err)
-  //   }
-  //   // finally {
-  //   //   // Replies are done on new streams, so let's close this stream so we don't leak it
-  //   //   await pipe([], stream)
-  //   // }
-  // }
-
   async handler ({ connection, stream , ...otherOptions}) {
     const remoteCallInstance = this;
     try {
-      let response;
       await pipe(
         stream,
         (source) => {
           return (async function *() {
+            let buff = "";
             for await (const message of source) {
-              response = await remoteCallInstance.handleIncomingMessage(uint8ArrayToString(message.subarray()), stream, connection.remotePeer)
-              yield remoteCallInstance.prepareSendData(response);
+              buff += uint8ArrayToString(message.subarray())
             }
+            const response = await remoteCallInstance.handleIncomingMessage(buff, stream, connection.remotePeer)
+            yield remoteCallInstance.prepareSendData(response);
           })();
         },
         stream.sink
@@ -154,9 +128,11 @@ class RemoteCall extends BaseNetworkPlugin {
         [this.prepareSendData(data)],
         stream,
         async (source) => {
+          let buff = ""
           for await (const message of source) {
-            this.handleSendResponse(uint8ArrayToString(message.subarray()), peer.id)
+            buff += uint8ArrayToString(message.subarray());
           }
+          this.handleSendResponse(buff, peer.id)
         }
       )
       //stream.close();
@@ -166,11 +142,11 @@ class RemoteCall extends BaseNetworkPlugin {
   }
 
   async handleSendResponse(signAndMessage, peerId){
-    let collateralPlugin:CollateralInfoPlugin = this.network.getPlugin('collateral');
+    let nodeManager:NodeManagerPlugin = this.network.getPlugin('node-manager');
     try {
       let message = signAndMessage.toString()
 
-      let nodeInfo = collateralPlugin.getNodeInfo(peerId2Str(peerId))
+      let nodeInfo = nodeManager.getNodeInfo(peerId2Str(peerId))
       if(!nodeInfo){
         throw {message: `Unrecognized receiver.`};
       }
@@ -264,7 +240,15 @@ class RemoteCall extends BaseNetworkPlugin {
     if(options.allowShieldNode)
       this.shieldNodeAllowedMethods[method] = options;
     // @ts-ignore
-    super.on(method, handler)
+    super.on(method, async (...args) => {
+      /** apply remote call middlewares */
+      if(options.middlewares && options.middlewares.length > 0){
+        for(const middleware of options.middlewares) {
+          await middleware(this.network, ...args)
+        }
+      }
+      return handler(...args)
+    })
   }
 
   allowCallByShieldNode(method, options) {

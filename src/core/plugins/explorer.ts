@@ -1,14 +1,13 @@
 import CallablePlugin from './base/callable-plugin.js'
 import Content from '../../common/db-models/Content.js'
-import {remoteApp, remoteMethod, gatewayMethod, globalBroadcastHandler, broadcastHandler} from './base/app-decorators.js'
-import TssPlugin from "./tss-plugin.js";
-import {AppContext, AppDeploymentStatus, MuonNodeInfo, Override} from "../../common/types";
+import {remoteApp, remoteMethod, gatewayMethod} from './base/app-decorators.js'
+import KeyManager from "./key-manager.js";
+import {AppContext, AppDeploymentStatus, AppRequest, MuonNodeInfo, Override} from "../../common/types";
 import HealthCheck from "./health-check.js";
 import {GatewayCallParams} from "../../gateway/types";
 import AppManager from "./app-manager.js";
 import * as NetworkIpc from '../../network/ipc.js'
-import {GlobalBroadcastChannels} from "../../common/contantes.js";
-import CollateralInfoPlugin from "./collateral-info.js";
+import NodeManagerPlugin from "./node-manager.js";
 import {timeout} from '../../utils/helpers.js'
 import {RedisCache} from "../../common/redis-cache.js";
 import BaseAppPlugin from "./base/base-app-plugin";
@@ -28,7 +27,6 @@ type GetAppData = Override<GatewayCallParams, {params: { appName?: string, appId
 
 const RemoteMethods = {
   IsReqConfirmationAnnounced: "is-req-conf-ann",
-  AppDeploymentStatus: "app-deployment-status",
   LoadAppContextAndKey: "load-app-context",
 }
 
@@ -36,12 +34,12 @@ const RemoteMethods = {
 class Explorer extends CallablePlugin {
   APP_NAME="explorer"
 
-  get tssPlugin(): TssPlugin {
-    return this.muon.getPlugin('tss-plugin');
+  get keyManager(): KeyManager {
+    return this.muon.getPlugin("key-manager");
   }
 
-  get collateralPlugin(): CollateralInfoPlugin {
-    return this.muon.getPlugin('collateral');
+  get nodeManager(): NodeManagerPlugin {
+    return this.muon.getPlugin('node-manager');
   }
 
   get healthPlugin(): HealthCheck {
@@ -58,7 +56,7 @@ class Explorer extends CallablePlugin {
     if(!id) {
       throw `id is undefined`
     }
-    let nodeInfo = this.collateralPlugin.getNodeInfo(id)!
+    let nodeInfo = this.nodeManager.getNodeInfo(id)!
     if(!nodeInfo) {
       throw `unknown peer`
     }
@@ -76,21 +74,6 @@ class Explorer extends CallablePlugin {
     }
   }
 
-  // @gatewayMethod("node-peer")
-  // async __nodePeerInfo(data: GetNodeInfo) {
-  //   let {id} = data?.params || {}
-  //   if(!id) {
-  //     throw `id is undefined`
-  //   }
-  //   let nodeInfo = this.collateralPlugin.getNodeInfo(id)!
-  //   if(!nodeInfo) {
-  //     throw `unknown peer`
-  //   }
-  //   return {
-  //     peerInfo: await NetworkIpc.getPeerInfoLight(nodeInfo.peerId)
-  //   }
-  // }
-
   /**
    * For all nodes in announce list of app, this function confirms that app.onConfirm has been called on this node.
    */
@@ -100,14 +83,14 @@ class Explorer extends CallablePlugin {
     if(!request)
       throw `request undefined`
     // @ts-ignore
-    const appParty = this.tssPlugin.getAppParty(request.appId, request.deploymentSeed)
+    const appParty = this.keyManager.getAppParty(request.appId, request.deploymentSeed)
     if(!appParty)
       throw `App party not found`;
 
     // @ts-ignore
     const {appId, reqId} = request;
     const app: BaseAppPlugin = this.muon.getAppById(appId)
-    let isValid = await app.verifyCompletedRequest(request, false)
+    let isValid = await app.verifyCompletedRequest(request as AppRequest, false)
     if(!isValid)
       throw `request validation failed.`
 
@@ -122,10 +105,10 @@ class Explorer extends CallablePlugin {
 
     const listToCheck = ([] as string[]).concat(...announceGroups);
 
-    const partners = this.collateralPlugin.filterNodes({list: listToCheck});
+    const partners = this.nodeManager.filterNodes({list: listToCheck});
     const announced: boolean[] = await Promise.all(partners.map(node => {
       if(node.wallet === process.env.SIGN_WALLET_ADDRESS) {
-        return this.__isReqConfirmationAnnounced(reqId, this.collateralPlugin.currentNodeInfo);
+        return this.__isReqConfirmationAnnounced(reqId, this.nodeManager.currentNodeInfo);
       }
       else {
         return this.remoteCall(
@@ -199,9 +182,12 @@ class Explorer extends CallablePlugin {
       contexts = await this.appManager.queryAndLoadAppContext(appId!)
 
     const contextStatuses = contexts.map((context: AppContext) => {
-      const statusTitle = this.appManager.getAppDeploymentStatus(appId!, context.seed);
+      const {status, hasTssKey} = this.appManager.getAppDeploymentInfo(appId!, context.seed);
       return {
-        status: statusTitle,
+        status,
+        hasTssKey,
+        key: this.appManager.getAppTssKey(context.appId, context.seed)?.keyShare,
+        keyGenReqId: context.keyGenRequest?.reqId,
         isBuiltIn: context.isBuiltIn,
         deployedTime: context.deploymentRequest?.data.timestamp,
         previousSeed: context.previousSeed,
@@ -219,7 +205,7 @@ class Explorer extends CallablePlugin {
     let appStatus = "NEW";
     if(contextStatuses.length > 0) {
       const context = this.appManager.getAppLastContext(appId);
-      appStatus = this.appManager.getAppDeploymentStatus(appId, context.seed);
+      appStatus = this.appManager.getAppDeploymentStatus(appId, context!.seed);
     }
 
     return {
@@ -236,30 +222,20 @@ class Explorer extends CallablePlugin {
     return confirmed === '1'
   }
 
-  @remoteMethod(RemoteMethods.AppDeploymentStatus)
-  async __getAppDeploymentStatus(data: {appId: string, seed: string}, callerInfo: MuonNodeInfo) {
-    const {appId, seed} = data
-    return this.appManager.getAppDeploymentStatus(appId, seed)
-  }
-
   @remoteMethod(RemoteMethods.LoadAppContextAndKey)
   async __loadAppContextAndKey(data: {appId:string, seed: string}, callerInfo: MuonNodeInfo) {
     const {appId, seed} = data
     if(!callerInfo.isDeployer && callerInfo.wallet !== process.env.SIGN_WALLET_ADDRESS)
       return;
-    const status:AppDeploymentStatus = this.appManager.getAppDeploymentStatus(appId, seed)
+    const {status, hasTssKey} = this.appManager.getAppDeploymentInfo(appId, seed)
     let contexts: AppContext[];
     if(status === 'NEW') {
       contexts = await this.appManager.queryAndLoadAppContext(appId);
       if(contexts.length===0)
         return;
       const ctx = contexts.find(ctx => ctx.seed === seed);
-      if(!ctx || !ctx.party.partners.includes(this.collateralPlugin.currentNodeInfo!.id))
+      if(!ctx || !ctx.party.partners.includes(this.nodeManager.currentNodeInfo!.id))
         return;
-    }
-    if(status !== 'DEPLOYED') {
-      await timeout(2000)
-      await this.tssPlugin.checkAppTssKeyRecovery(appId, seed);
     }
   }
 }

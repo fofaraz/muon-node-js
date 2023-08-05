@@ -3,7 +3,6 @@
 import {CoreGlobalEvent} from "./ipc.js";
 import Events from 'events'
 import chalk from 'chalk'
-import emoji from 'node-emoji'
 import fs from 'fs'
 import { MessagePublisher, MessageSubscriber } from '../common/message-bus/index.js'
 import { GLOBAL_EVENT_CHANNEL, fireEvent } from './ipc.js'
@@ -11,7 +10,7 @@ import * as NetworkIpc from '../network/ipc.js'
 import MuonBasePlugin from './plugins/base/base-plugin.js';
 import BaseAppPlugin from "./plugins/base/base-app-plugin.js";
 import BasePlugin from "./plugins/base/base-plugin.js";
-import {Constructor} from "../common/types";
+import {Constructor, DeploymentTssConfigs, NetConfigs, PolynomialInfoJson} from "../common/types";
 
 export type MuonPluginConfigs = any
 
@@ -23,42 +22,8 @@ export type MuonPlugin = {
 
 export type MuonConfigs = {
   plugins: MuonPlugin[],
-  tss: {
-    party: {
-      id: string,
-      t: number,
-      max: number
-    },
-    key: {
-      id: string,
-      share: string,
-      publicKey: string,
-      address: string
-    }
-  },
-  net: {
-    tss: {
-      threshold: number,
-      max: number,
-      defaultTTL: number,
-      pendingPeriod: number,
-    },
-    nodeManager: {
-      network: string,
-      address: string
-    },
-    "routing": {
-      "delegate": string[]
-    },
-    "nodes"?: {
-      "onlineList"?: string,
-    },
-    bootstrap: string[],
-    fee?: {
-      endpoint: string,
-      signers: string[]
-    }
-  },
+  tss: DeploymentTssConfigs,
+  net: NetConfigs,
 }
 
 export default class Muon extends Events {
@@ -78,12 +43,12 @@ export default class Muon extends Events {
     await this._initializePlugin(this.configs.plugins)
   }
 
-  _initializePlugin(plugins: MuonPlugin[]) {
+  async _initializePlugin(plugins: MuonPlugin[]) {
     for (let plugin of plugins) {
 
       const pluginInstance = new plugin.module(this, plugin.config)
       this._plugins[plugin.name] = pluginInstance
-      pluginInstance.onInit();
+      await pluginInstance.onInit();
 
       if(pluginInstance instanceof BaseAppPlugin) {
         if(pluginInstance.APP_NAME) {
@@ -132,12 +97,12 @@ export default class Muon extends Events {
   async start() {
     // @ts-ignore
     this.globalEventBus.on("message", this.onGlobalEventReceived.bind(this));
-    this._onceStarted();
+    await this._onceStarted();
   }
 
   async _onceStarted() {
     for (let pluginName in this._plugins) {
-      this._plugins[pluginName].onStart()
+      await this._plugins[pluginName].onStart()
     }
   }
 

@@ -1,4 +1,4 @@
-import {AppContext, AppRequest, IpcCallOptions, MuonNodeInfo} from "../common/types";
+import {AppContext, AppDeploymentInfo, AppRequest, IpcCallOptions, MuonNodeInfo} from "../common/types";
 import { QueueProducer, MessagePublisher } from '../common/message-bus/index.js'
 import { BROADCAST_CHANNEL } from './plugins/broadcast.js'
 import { IPC_CHANNEL } from './plugins/core-ipc-plugin.js'
@@ -37,8 +37,8 @@ export function fireEvent(event: CoreGlobalEvent, options: MessageOptions={}) {
   coreGlobalEvents.send(event, options)
 }
 
-export async function forwardRemoteCall(data: any, callerInfo: MuonNodeInfo, options: IpcCallOptions) {
-  return await call(IpcMethods.ForwardRemoteCall, {data, callerInfo}, options);
+export async function execRemoteCall(data: any, callerInfo: MuonNodeInfo, options: IpcCallOptions) {
+  return await call(IpcMethods.ExecRemoteCall, {data, callerInfo}, options);
 }
 
 export async function getAppId(appName: string): Promise<string> {
@@ -95,4 +95,16 @@ export async function findNAvailablePartners(appId: string, seed: string, search
 
 export async function verifyRequestSignature(request: AppRequest) {
   return call(IpcMethods.VerifyRequestSignature, request);
+}
+
+export async function getAppDeploymentInfo(appId: string, seed: string): Promise<AppDeploymentInfo> {
+  return call(IpcMethods.GetAppDeploymentInfo, {appId, seed});
+}
+
+export async function getNodeLastContextTime(node: string): Promise<number|undefined> {
+  return call(IpcMethods.GetNodeLastContextTime, node);
+}
+
+export async function isDbSynced(): Promise<boolean> {
+  return call(IpcMethods.IsDbSynced, {});
 }

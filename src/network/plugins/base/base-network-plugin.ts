@@ -1,13 +1,13 @@
-import CollateralInfoPlugin from "../collateral-info.js";
 import {Network} from "../../index.js";
 import NetworkBroadcastPlugin from "../network-broadcast.js";
 import Events from 'events-async'
-import {isPeerId, Libp2pPeer, Libp2pPeerInfo, PeerId} from '../../types.js';
+import {isPeerId, Libp2pPeer, Libp2pPeerInfo} from '../../types.js';
 import {peerIdFromString} from '@libp2p/peer-id'
 import {logger, Logger} from '@libp2p/logger'
-import {fromString as uint8ArrayFromString} from 'uint8arrays/from-string';
+import { multiaddr } from '@multiformats/multiaddr';
+import {fromString as uint8ArrayFromString} from 'uint8arrays/from-string'
 import {toString as uint8ArrayToString} from 'uint8arrays/to-string';
-import {peerId2Str} from "../../utils.js";
+import {loadGlobalConfigs} from "../../../common/configurations.js";
 
 export default class BaseNetworkPlugin extends Events {
   network: Network;
@@ -25,7 +25,7 @@ export default class BaseNetworkPlugin extends Events {
    * Runs right after the plugin has been created.
    */
   async onInit(){
-    
+
   }
 
   /**
@@ -38,8 +38,8 @@ export default class BaseNetworkPlugin extends Events {
   /**
    * Returns the PeerInfo object associated with the
    * specified peerId.
-   * First, it looks for the peerId in the local peerStore. 
-   * If it is not found there, then it queries the 
+   * First, it looks for the peerId in the local peerStore.
+   * If it is not found there, then it queries the
    * peerRouting (delegated nodes) for it.
    */
   async findPeer(peerId): Promise<Libp2pPeerInfo|null>{
@@ -50,48 +50,49 @@ export default class BaseNetworkPlugin extends Events {
         throw `Invalid string PeedID [${peerId}]: ${e.message}`;
       }
     }
+
+
     try {
       let peer: Libp2pPeer = await this.network.libp2p.peerStore.get(peerId)
         .catch(e => null)
-      if(peer) {
-        this.defaultLogger(`peer found local %p`, peerId)
+
+      if (peer && peer.addresses.length && this.hasValidTimestamp(peer)) {
+        this.defaultLogger(`peer found local %p`, peerId);
         return {
           id: peerId,
           multiaddrs: peer.addresses.map(addr => addr.multiaddr),
           protocols: []
         };
       }
-      this.defaultLogger(`peer not found local %p`, peerId)
-      return await this.network.libp2p.peerRouting.findPeer(peerId)
-    }
-    catch (e) {
-      // TODO: what to do?
-      // this.defaultLogger("%o", e)
-      console.log('MUON_PEER_NOT_FOUND', peerId)
-      return null;
-    }
-  }
+      this.defaultLogger(`peer not found local %p`, peerId);
+      let routingPeer = await this.network.libp2p.peerRouting.findPeer(peerId);
 
-  async findPeerLocal(peerId): Promise<Libp2pPeerInfo|null>{
-    if(!isPeerId(peerId)) {
+      // There is a bug on libp2p 0.45.x
+      // When a node dial another node, peer.addresses does not
+      // save correctly on peerStore.
+      // https://github.com/libp2p/js-libp2p/issues/1761
+      //
+      // We load addresses from peerRouting and patch the
+      // peerStore
       try {
-        peerId = peerIdFromString(peerId)
-      }catch (e) {
-        throw `Invalid string PeedID [${peerId}]: ${e.message}`;
+        //set timestamp on newly found peer
+        const timestamp = Date.now();
+        const uint8Array = uint8ArrayFromString(`${timestamp}`);
+
+        this.network.libp2p.peerStore.patch(peerId, {
+          multiaddrs: routingPeer.multiaddrs.map(x => multiaddr(x)),
+          metadata: {timestamp: uint8Array}
+        });
+      } catch (e) {
+        this.defaultLogger.error(`cannot patch peerStore, ${e.message}`);
       }
-    }
-    try {
-      let ret = await this.network.libp2p.peerStore.get(peerId)
-      return {
-        id: ret.id,
-        multiaddrs: ret.addresses.map(x => x.multiaddr),
-        protocols: []
-      }
+
+      return routingPeer;
     }
     catch (e) {
       // TODO: what to do?
       // this.defaultLogger("%o", e)
-      console.log('MUON_PEER_NOT_FOUND', peerId)
+      this.defaultLogger('MUON_PEER_NOT_FOUND %o', peerId)
       return null;
     }
   }
@@ -147,5 +148,19 @@ export default class BaseNetworkPlugin extends Events {
       // this.defaultLogger.error("%o", e)
       throw e;
     }
+  }
+
+
+  hasValidTimestamp(peer) {
+    const configs = loadGlobalConfigs('net.conf.json', 'default.net.conf.json');
+    const peerStoreTTL = parseInt(configs.routing.peerStoreTTL);
+    let timestamp = peer.metadata.get("timestamp");
+    if (!timestamp)
+      return false;
+    timestamp = uint8ArrayToString(timestamp);
+    if (Date.now() - timestamp > peerStoreTTL)
+      return false;
+
+    return true;
   }
 }

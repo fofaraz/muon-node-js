@@ -1,32 +1,34 @@
 import BasePlugin from './base/base-plugin.js'
 import TimeoutPromise from '../../common/timeout-promise.js'
 import * as NetworkIpc from '../../network/ipc.js'
-import {NetworkInfo, NodeFilterOptions} from '../../network/plugins/collateral-info.js'
+import {NodeFilterOptions} from '../../network/plugins/node-manager.js'
 import {MuonNodeInfo} from "../../common/types";
 import {logger} from '@libp2p/logger'
 import lodash from 'lodash'
 
-const log = logger('muon:core:plugins:collateral')
+const log = logger('muon:core:plugins:node-manager')
 
-export default class CollateralInfoPlugin extends BasePlugin{
-  networkInfo: NetworkInfo;
-  private allowedWallets: string[] = []
+export default class NodeManagerPlugin extends BasePlugin{
 
   private _nodesList: MuonNodeInfo[];
   private _nodesMap: Map<string, MuonNodeInfo> = new Map<string, MuonNodeInfo>();
   /**
    * @type {TimeoutPromise}
    */
-  loading = new TimeoutPromise(0, "collateral loading timedout");
+  loading = new TimeoutPromise(0, "contract loading timed out");
+
+  async onInit(): Promise<any> {
+    await super.onInit();
+
+    await this._loadNodeManagerData();
+  }
 
   async onStart(){
-    super.onStart();
+    await super.onStart();
 
-    this.muon.on("collateral:node:add", this.onNodeAdd.bind(this));
-    this.muon.on("collateral:node:edit", this.onNodeEdit.bind(this));
-    this.muon.on("collateral:node:delete", this.onNodeDelete.bind(this));
-
-    this._loadCollateralInfo();
+    this.muon.on("contract:node:add", this.onNodeAdd.bind(this));
+    this.muon.on("contract:node:edit", this.onNodeEdit.bind(this));
+    this.muon.on("contract:node:delete", this.onNodeDelete.bind(this));
   }
 
   private updateNodeInfo(index: string, dataToMerge: object, keysToDelete?:string[]) {
@@ -54,21 +56,19 @@ export default class CollateralInfoPlugin extends BasePlugin{
 
   async onNodeAdd(nodeInfo: MuonNodeInfo) {
     await this.waitToLoad()
-    log(`Core.CollateralInfo.onNodeAdd %o`, nodeInfo)
+    log(`Core.NodeManager.onNodeAdd %o`, nodeInfo)
     this._nodesList.push(nodeInfo)
 
     this._nodesMap
       .set(nodeInfo.id, nodeInfo)
       .set(nodeInfo.wallet, nodeInfo)
       .set(nodeInfo.peerId, nodeInfo)
-
-    this.allowedWallets.push(nodeInfo.wallet);
   }
 
   async onNodeEdit(data: {nodeInfo: MuonNodeInfo, oldNodeInfo: MuonNodeInfo}) {
     await this.waitToLoad()
     const {nodeInfo, oldNodeInfo} = data
-    log(`Core.CollateralInfo.onNodeEdit %o`, {nodeInfo, oldNodeInfo})
+    log(`Core.NodeManager.onNodeEdit %o`, {nodeInfo, oldNodeInfo})
     const listIndex = this._nodesList.findIndex(item => item.id === nodeInfo.id)
     this._nodesList.splice(listIndex, 1, nodeInfo);
 
@@ -76,17 +76,11 @@ export default class CollateralInfoPlugin extends BasePlugin{
       .set(nodeInfo.id, nodeInfo)
       .set(nodeInfo.wallet, nodeInfo)
       .set(nodeInfo.peerId, nodeInfo)
-
-
-    /** update allowedWallets */
-    const idx2 = this.allowedWallets.findIndex(w => w === oldNodeInfo.wallet)
-    this.allowedWallets.splice(idx2, 1);
-    this.allowedWallets.push(nodeInfo.wallet);
   }
 
   async onNodeDelete(nodeInfo: MuonNodeInfo) {
     await this.waitToLoad()
-    log(`Core.CollateralInfo.onNodeDelete %o`, nodeInfo)
+    log(`Core.NodeManager.onNodeDelete %o`, nodeInfo)
 
     /** remove from nodesList */
     const idx1 = this._nodesList.findIndex(item => item.id === nodeInfo.id)
@@ -96,24 +90,18 @@ export default class CollateralInfoPlugin extends BasePlugin{
     this._nodesMap.delete(nodeInfo.id)
     this._nodesMap.delete(nodeInfo.wallet)
     this._nodesMap.delete(nodeInfo.peerId)
-
-    /** remove from allowedWallets */
-    const idx2 = this.allowedWallets.findIndex(w => w === nodeInfo.wallet)
-    this.allowedWallets.splice(idx2, 1);
   }
 
-  private async _loadCollateralInfo(){
+  private async _loadNodeManagerData(){
     let info;
     while(!info) {
       try {
-        info = await NetworkIpc.getCollateralInfo({timeout: 1000});
+        info = await NetworkIpc.getNodeManagerData({timeout: 1000});
       }catch (e) {
-        log(`process[${process.pid}] collateral info loading failed %o`, e);
+        log(`process[${process.pid}] contract info loading failed %o`, e);
       }
     }
-    const { networkInfo, nodesList } = info
-
-    this.networkInfo = networkInfo;
+    const { nodesList } = info
 
     this._nodesList = nodesList;
     nodesList.forEach(n => {
@@ -121,18 +109,12 @@ export default class CollateralInfoPlugin extends BasePlugin{
         .set(n.id, n)
         .set(n.wallet, n)
         .set(n.peerId, n)
-      this.allowedWallets.push(n.wallet);
     })
 
-    log('Collateral info loaded.');
+    log('Contract info loaded.');
     // @ts-ignore
     this.emit('loaded');
     this.loading.resolve(true);
-  }
-
-  // TODO: not implemented
-  getAllowedWallets(){
-    return this.allowedWallets;
   }
 
   /**
@@ -147,21 +129,6 @@ export default class CollateralInfoPlugin extends BasePlugin{
    */
   get currentNodeInfo(): MuonNodeInfo|undefined {
     return this._nodesMap.get(process.env.SIGN_WALLET_ADDRESS!);
-  }
-
-  get TssThreshold(): number{
-    if(this.networkInfo)
-      return this.networkInfo?.tssThreshold;
-    else
-      return Infinity;
-  }
-
-  get MinGroupSize(){
-    return this.networkInfo?.minGroupSize;
-  }
-
-  get MaxGroupSize(){
-    return this.networkInfo?.maxGroupSize;
   }
 
   waitToLoad(): Promise<any>{

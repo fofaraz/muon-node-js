@@ -1,18 +1,12 @@
 import {gatewayMethod, remoteApp, remoteMethod} from "./base/app-decorators.js";
 import CallablePlugin from "./base/callable-plugin.js";
-import {IMpcNetwork, PartnerRoundReceive} from "../../common/mpc/types";
+import {IMpcNetwork, MapOf, PartnerRoundReceive} from "../../common/mpc/types";
 import {MultiPartyComputation} from "../../common/mpc/base.js";
-import {DistributedKeyGeneration} from "../../common/mpc/dkg.js";
-import {DistKey} from '../../common/mpc/dist-key.js'
-import CollateralInfoPlugin from "./collateral-info.js";
-import DistributedKey from "../../utils/tss/distributed-key.js";
+import NodeManagerPlugin from "./node-manager.js";
 import * as NetworkIpc from '../../network/ipc.js'
-import TssPlugin from "./tss-plugin.js";
-import * as SharedMemory from "../../common/shared-memory/index.js";
-import {bn2hex} from "../../utils/tss/utils.js";
 import NodeCache from 'node-cache'
 import {logger} from '@libp2p/logger'
-import {PartyInfo} from "../../common/types";
+import {MpcInitHandler, MpcType, PartyInfo} from "../../common/types";
 
 const log = logger("muon:core:plugins:mpc:network")
 
@@ -31,11 +25,10 @@ const RemoteMethods = {
   AskRoundN: 'ask-round-n'
 }
 
-const random = () => Math.floor(Math.random()*9999999)
-
 @remoteApp
 class MpcNetworkPlugin extends CallablePlugin implements IMpcNetwork{
   APP_NAME="mpcnet"
+  private mpcInitializeHandlers: MapOf<MpcInitHandler> = {}
   // public readonly id: string;
 
   constructor(muon, configs) {
@@ -43,15 +36,11 @@ class MpcNetworkPlugin extends CallablePlugin implements IMpcNetwork{
   }
 
   get id() {
-    return this.collateralPlugin.currentNodeInfo!.id;
+    return this.nodeManager.currentNodeInfo!.id;
   }
 
-  private get collateralPlugin(): CollateralInfoPlugin {
-    return this.muon.getPlugin('collateral');
-  }
-
-  private get tssPlugin(): TssPlugin {
-    return this.muon.getPlugin('tss-plugin');
+  private get nodeManager(): NodeManagerPlugin {
+    return this.muon.getPlugin('node-manager');
   }
 
   async registerMpc(mpc: MultiPartyComputation) {
@@ -66,16 +55,16 @@ class MpcNetworkPlugin extends CallablePlugin implements IMpcNetwork{
   }
 
   async askRoundData(fromPartner: string, mpcId: string, round:number, data: any): Promise<PartnerRoundReceive> {
-    let nodeInfo = this.collateralPlugin.getNodeInfo(fromPartner)!
+    let nodeInfo = this.nodeManager.getNodeInfo(fromPartner)!
     if(nodeInfo.wallet === process.env.SIGN_WALLET_ADDRESS) {
-      return this.__askRoundN({mpcId, round, data}, this.collateralPlugin.currentNodeInfo)
+      return this.__askRoundN({mpcId, round, data}, this.nodeManager.currentNodeInfo)
     }
     else {
       return this.remoteCall(
         nodeInfo.peerId,
         RemoteMethods.AskRoundN,
         {mpcId, round, data},
-        {taskId: mpcId, timeout: 15e3}
+        {taskId: mpcId, timeout: 20e3}
       )
     }
   }
@@ -87,39 +76,25 @@ class MpcNetworkPlugin extends CallablePlugin implements IMpcNetwork{
     return mpc.waitToFulfill()
   }
 
+  registerMpcInitHandler(mpcType: MpcType, handler:MpcInitHandler) {
+    if(!!this.mpcInitializeHandlers[mpcType])
+      throw `Only one MPC initializer most be registered`;
+    this.mpcInitializeHandlers[mpcType] = handler;
+  }
+
+  async callMpcInitHandler(mpcType: MpcType, constructData) {
+    if(!this.mpcInitializeHandlers[mpcType])
+      throw `MPC initializer not registered`;
+    return this.mpcInitializeHandlers[mpcType](constructData, this);
+  }
+
   @remoteMethod(RemoteMethods.AskRoundN)
   async __askRoundN(message, callerInfo): Promise<PartnerRoundReceive> {
     const {mpcId, round, data} = message;
     if(round === 0) {
       if(!mpcCache.has(mpcId)) {
-        // @ts-ignore
-        let mpc = new DistributedKeyGeneration(...data.constructData)
-
-        // console.log(`key generation start`, data.constructData)
-        mpc.runByNetwork(this)
-          .then(async (dKey: DistKey) => {
-            if(mpc.extraParams.lowerThanHalfN && dKey.publicKeyLargerThanHalfN())
-              return;
-
-            const {appId, seed, isForReshare} = mpc.extraParams.partyInfo as PartyInfo
-            const party = await this.tssPlugin.getAppPartyAsync(appId, seed, isForReshare);
-            if(!party) {
-              throw `party[${mpc.extraParams.party}] not found`
-            }
-
-            let key = DistributedKey.load(party, {
-              id: mpc.extraParams.keyId,
-              share: bn2hex(dKey.share),
-              publicKey: dKey.publicKey,
-              partners: mpc.partners
-            })
-            // console.log(`new distributed key`, key.toSerializable());
-            await SharedMemory.set(mpc.extraParams.keyId, key.toSerializable(), 30*60*1000)
-          })
-          .catch(e => {
-            // TODO
-            log.error("MpcNetwork running mpc failed. %O", e)
-          })
+        const {constructData, constructData: {extra}} = data;
+        await this.callMpcInitHandler(extra.mpcType, constructData);
       }
     }
     const mpc: MultiPartyComputation = mpcCache.get(mpcId)!;

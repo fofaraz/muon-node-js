@@ -48,8 +48,8 @@ export async function handler(argv) {
   }
 }
 
-export async function deployApp(argv, configs) {
-  const {app, nodes, ttl, pending} = argv;
+async function deployApp(argv, configs) {
+  const {app, nodes, t, n, ttl, pending} = argv;
   console.log('retrieving app ID ...')
   const statusResult = await muonCall(configs.url, {
     app: 'explorer',
@@ -96,6 +96,8 @@ export async function deployApp(argv, configs) {
           nonce: randomSeedResponse.result.data.init.nonceAddress,
         },
         nodes: !!nodes ? nodes.split(',') : undefined,
+        t,
+        n,
         ttl,
         pendingPeriod: pending,
       }
@@ -133,7 +135,7 @@ export async function deployApp(argv, configs) {
 }
 
 async function reshareApp(argv, configs) {
-  const {app, nodes, ttl, pending} = argv;
+  const {app, nodes, n, ttl, pending} = argv;
   console.log('Retrieving app ID ...')
   const statusResult = await muonCall(configs.url, {
     app: 'explorer',
@@ -189,6 +191,7 @@ async function reshareApp(argv, configs) {
           nonce: randomSeedResponse.result.data.init.nonceAddress,
         },
         nodes: !!nodes ? nodes.split(',') : undefined,
+        n,
         ttl,
         pendingPeriod: pending,
       }
@@ -204,7 +207,7 @@ async function reshareApp(argv, configs) {
   else {
     console.log("Rotation is not needed for any context.")
     /** If there is no PENDING context, find a context to KeyGen */
-    const groupSelectedContext = contexts.find(ctx => ctx.status === APP_STATUS_TSS_GROUP_SELECTED);
+    const groupSelectedContext = contexts.find(ctx => (ctx.status === APP_STATUS_TSS_GROUP_SELECTED && !!ctx.previousSeed));
     if(!groupSelectedContext) {
       console.log("There is no pending context to reshare it.")
       return;

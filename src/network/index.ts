@@ -1,29 +1,31 @@
-import NetworkContentPlugin from "./plugins/content-plugin.js";
 import mongoose from "mongoose";
 import Events from "events-async";
 import { create } from "./libp2p_bundle.js";
 import { bootstrap } from "@libp2p/bootstrap";
-// import {pubsubPeerDiscovery} from "@libp2p/pubsub-peer-discovery";
-// import { mdns } from '@libp2p/mdns'
 import loadConfigs from "./configurations.js";
 import { createFromJSON } from "@libp2p/peer-id-factory";
-import chalk from "chalk";
-import emoji from "node-emoji";
-import { isPrivate, peerId2Str } from "./utils.js";
-import * as CoreIpc from "../core/ipc.js";
+import {
+  getNodeManagerDataFromCache,
+  isPrivate,
+  peerId2Str,
+  tryAndGetNodeManagerData
+} from "./utils.js";
 import { MessagePublisher } from "../common/message-bus/index.js";
-import CollateralPlugin from "./plugins/collateral-info.js";
+import NodeManagerPlugin, {NodeManagerPluginConfigs} from "./plugins/node-manager.js";
+import LatencyCheckPlugin from "./plugins/latency-check.js";
 import IpcHandlerPlugin from "./plugins/network-ipc-handler.js";
 import IpcPlugin from "./plugins/network-ipc-plugin.js";
 import RemoteCallPlugin from "./plugins/remote-call.js";
 import NetworkBroadcastPlugin from "./plugins/network-broadcast.js";
-// import NetworkDHTPlugin from "./plugins/network-dht.js";
 import { logger } from "@libp2p/logger";
-import { findMyIp, parseBool } from "../utils/helpers.js";
+import {findMyIp, parseBool, timeout} from "../utils/helpers.js";
 import { muonRouting } from "./muon-routing.js";
 
 import * as NetworkIpc from "../network/ipc.js";
-import { MuonNodeInfo } from "../common/types";
+import MessageSubscriber from "../common/message-bus/msg-subscriber.js";
+import {GLOBAL_EVENT_CHANNEL} from "../network/ipc.js";
+import {CoreGlobalEvent} from "../core/ipc";
+import {NodeManagerData} from "../common/types";
 
 const log = logger("muon:network");
 
@@ -32,15 +34,12 @@ class Network extends Events {
   libp2p;
   peerId;
   _plugins = {};
-  private connectedPeers: { [index: string]: boolean } = {};
+  on: (eventName: string, listener) => void;
+  globalEventBus: MessageSubscriber = new MessageSubscriber(GLOBAL_EVENT_CHANNEL);
 
   constructor(configs) {
     super();
     this.configs = configs;
-  }
-
-  getConnectedPeers(): { [index: string]: boolean } {
-    return this.connectedPeers;
   }
 
   async _initializeLibp2p() {
@@ -159,13 +158,6 @@ class Network extends Events {
       //   },
       // },
     });
-    libp2p.addEventListener("peer:connect", this.onPeerConnect.bind(this));
-    libp2p.addEventListener(
-      "peer:disconnect",
-      this.onPeerDisconnect.bind(this)
-    );
-
-    // libp2p.addEventListener("peer:discovery", this.onPeerDiscovery.bind(this));
 
     this.peerId = peerId;
     this.libp2p = libp2p;
@@ -193,22 +185,25 @@ class Network extends Events {
       let { port, natIp } = this.configs.libp2p;
     }
 
-    log(
-      emoji.get("moon") +
-        " " +
-        chalk.blue(" Node ready ") +
-        " " +
-        emoji.get("headphones") +
-        " " +
-        chalk.blue(` Listening on: ${this.configs.libp2p.port}`)
-    );
+    log(`Node ready Listening on: ${this.configs.libp2p.port}`);
 
     log("====================== Bindings ====================");
     this.libp2p.getMultiaddrs().forEach((ma) => {
       log(ma.toString());
     });
     log("====================================================");
+
+    // @ts-ignore
+    this.globalEventBus.on("message", this.onGlobalEventReceived.bind(this));
     this._onceStarted();
+  }
+
+  async onGlobalEventReceived(event: CoreGlobalEvent, info) {
+    // console.log(`[${process.pid}] core.Muon.onGlobalEventReceived`, event)
+    try {
+      // @ts-ignore
+      await this.emit(event.type, event.data, info);
+    }catch (e) {}
   }
 
   async _onceStarted() {
@@ -222,61 +217,6 @@ class Network extends Events {
         console.error(`network: plugins start error`, e);
       });
     }
-  }
-
-  async onPeerDiscovery(evt) {
-    const peer = evt.detail;
-    const peerId = peer.id;
-    this.connectedPeers[peerId2Str(peerId)] = true;
-    // @ts-ignore
-    this.emit("peer:discovery", peerId);
-    CoreIpc.fireEvent({ type: "peer:discovery", data: peerId2Str(peerId) });
-    log("found peer");
-    try {
-      log("discovered peer info %s", peerId2Str(peerId));
-    } catch (e) {
-      console.log("Error Muon.onPeerDiscovery", e);
-    }
-  }
-
-  onPeerConnect(evt) {
-    const connection = evt.detail;
-    log(
-      emoji.get("moon") +
-        " " +
-        chalk.blue(" Node connected to ") +
-        " " +
-        emoji.get("large_blue_circle") +
-        " " +
-        chalk.blue(` ${peerId2Str(connection.remotePeer)}`)
-    );
-    this.connectedPeers[peerId2Str(connection.remotePeer)] = true;
-    // @ts-ignore
-    this.emit("peer:connect", connection.remotePeer);
-    CoreIpc.fireEvent({
-      type: "peer:connect",
-      data: peerId2Str(connection.remotePeer),
-    });
-  }
-
-  onPeerDisconnect(evt) {
-    const connection = evt.detail;
-    delete this.connectedPeers[peerId2Str(connection.remotePeer)];
-    log(
-      emoji.get("moon") +
-        " " +
-        chalk.red(" Node disconnected") +
-        " " +
-        emoji.get("large_blue_circle") +
-        " " +
-        chalk.red(` ${peerId2Str(connection.remotePeer)}`)
-    );
-    // @ts-ignore
-    this.emit("peer:disconnect", connection.remotePeer);
-    CoreIpc.fireEvent({
-      type: "peer:disconnect",
-      data: peerId2Str(connection.remotePeer),
-    });
   }
 }
 
@@ -317,6 +257,25 @@ async function start() {
 
   let { net, tss } = await loadConfigs();
 
+  // Waits a random time(0-5 secs) to avoid calling
+  // RPC nodes by all network nodes at the same time
+  // When the network restarts
+  await timeout(Math.floor(Math.random()*5e3));
+
+  log(`loading NodeManager data %o`,{chain: net.nodeManager.network, contract: net.nodeManager.address})
+  let nodeManagerData: NodeManagerData;
+  log("checking cache for NodeManager data ...")
+  try {
+    nodeManagerData = await getNodeManagerDataFromCache(net.nodeManager);
+    log('NodeManager data loaded from cache.');
+  }
+  catch (e) {
+    log('NodeManager data load from cache failed. loading from network ... %O', e)
+    nodeManagerData = await tryAndGetNodeManagerData(net.nodeManager);
+  }
+  const maxId: number = nodeManagerData.nodes.reduce((max, n) => Math.max(max, parseInt(n.id)), 0);
+  log(`${nodeManagerData.nodes.length} node info loaded. max id: ${maxId}`)
+
   if (!process.env.PEER_PORT) {
     throw { message: "peer listening port should be defined in .env file" };
   }
@@ -340,16 +299,21 @@ async function start() {
       bootstrap: getLibp2pBootstraps(),
     },
     plugins: {
-      collateral: [CollateralPlugin, {}],
+      "node-manager": [
+        NodeManagerPlugin,
+        {
+          initialNodeManagerData: nodeManagerData
+        } as NodeManagerPluginConfigs
+      ],
+      "latency": [LatencyCheckPlugin, {}],
       broadcast: [NetworkBroadcastPlugin, {}],
-      content: [NetworkContentPlugin, {}],
       "remote-call": [RemoteCallPlugin, {}],
       ipc: [IpcPlugin, {}],
       "ipc-handler": [IpcHandlerPlugin, {}],
       // dht: [NetworkDHTPlugin, {}]
     },
     net,
-    // TODO: pass it into the tss-plugin
+    // TODO: pass it into the key-manager
     tss,
   };
   const network = new Network(configs);

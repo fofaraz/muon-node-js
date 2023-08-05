@@ -1,7 +1,6 @@
 import dotenv from 'dotenv'
 import path from 'path'
 dotenv.config()
-import emoji from 'node-emoji'
 import fs from 'fs'
 import Web3 from 'web3'
 import parseArgv from '../src/utils/parseArgv.js'
@@ -44,6 +43,7 @@ REDIS_HOST = localhost
 REDIS_PORT = 6379
 
 GATEWAY_HOST = 0.0.0.0
+PUBLIC_IP = 127.0.0.1
 GATEWAY_PORT = ${data.gatewayPort}
 
 CONFIG_BASE_PATH = ${data.configPath}
@@ -134,29 +134,38 @@ const createEnv = async () => {
     })
 
     fs.writeFileSync(`${BASE_PATH}/devnet/nodes/dev-node-${index + 1}.env`, envContent)
-    console.log(emoji.get('o'), `Node-${index + 1} Ethereum Address: `, account.address)
+    console.log("⭕", `Node-${index + 1} Ethereum Address: `, account.address)
   }
 
   /***** Create Other net.conf.json ******/
+  const defaultNetConfigs = JSON.parse(fs.readFileSync(`${BASE_PATH}/config/global/default.net.conf.json`))
 
   let netConf = JSON.stringify(
     {
-      "tss": {
+      ...defaultNetConfigs,
+      tss: {
+        ...defaultNetConfigs.tss,
         "threshold": threshold,
         "max": 100
       },
-      "nodeManager": {
+      nodeManager: {
         "network": "mumbai",
         "address": "0x3112a7D5b3960d2C528cd83217E3170f8d252432"
       },
-      "routing": {
+      routing: {
         "delegate": [
           `http://127.0.0.1:${baseGatewayPort}/delegate`
+        ],
+        "ifconfig":[
+          `http://127.0.0.1:${baseGatewayPort}/ifconfig`
         ]
       },
-      "bootstrap": [
+      nodes: undefined,
+      bootstrap: [
         firstNodeAddress
-      ]
+      ],
+      fee: undefined,
+      synchronizer: undefined,
     },
     null,
     2
@@ -166,7 +175,7 @@ const createEnv = async () => {
   // reload. For example, when address of NodeManager is updating
   // net.conf still refers to the old address
   fs.writeFileSync(`${BASE_PATH}/config/global/net.conf.json`, netConf)
-  console.log(emoji.get('o'), `net.conf.json is created`)
+  console.log("⭕", `net.conf.json is created`)
   // console.log('Environment is created successfully for run nodes')
 }
 

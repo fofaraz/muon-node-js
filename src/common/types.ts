@@ -1,5 +1,7 @@
 import {GlobalBroadcastChannels} from "./contantes";
 import BN from 'bn.js'
+import {PublicKey} from "../utils/tss/types";
+import {MultiPartyComputation} from "./mpc/base";
 
 export type JsonPeerInfo = {
     id: string;
@@ -19,6 +21,7 @@ export type RemoteCallOptions = {
 
 export type RemoteMethodOptions = {
     allowShieldNode?: boolean,
+    middlewares?: any[],
 }
 
 export type Constructor<T> = new (...args: any[]) => T;
@@ -65,9 +68,13 @@ export type AppDeploymentInfo = {
     seed: string|null,
     /** Is app deployed? */
     deployed: boolean,
+    /** Is this context contains the TSS key generation request data */
+    hasKeyGenRequest: boolean,
+    /** Is this node has the App's TSS key share */
+    hasTssKey: boolean,
     /** deployment status*/
     status: AppDeploymentStatus,
-    /** reqId of confirmed deployment request signed by global tss group */
+    /** reqId of confirmed deployment request signed by deployment tss group */
     reqId?: string,
     /** hash of context */
     contextHash?: string,
@@ -91,9 +98,8 @@ export type MuonSignature = {
     ownerPublicKey: {
         x: string,
         yParity: '0' | '1',
-        timestamp: number,
-        signature: string,
-    }
+    },
+    signature: string,
 }
 
 export type AppRequest = {
@@ -165,7 +171,18 @@ export type AppContext = {
     expiration?: number,
     deploymentRequest?: AppRequest,
     keyGenRequest?: AppRequest,
-    publicKey?: JsonPublicKey
+    publicKey?: JsonPublicKey,
+    polynomial?: PolynomialInfoJson
+}
+
+export type PolynomialInfo = {
+    t: number,
+    Fx: PublicKey[]
+}
+
+export type PolynomialInfoJson = {
+    t: number,
+    Fx: string[]
 }
 
 export type AppTssConfig = {
@@ -175,6 +192,12 @@ export type AppTssConfig = {
     publicKey: JsonPublicKey,
     keyShare?: string,
     expiration?: number,
+    polynomial?: PolynomialInfoJson
+}
+
+export type AppTssPublicInfo = {
+    publicKey: string,
+    polynomial?: PolynomialInfoJson
 }
 
 export type PartyInfo = {
@@ -182,3 +205,84 @@ export type PartyInfo = {
     seed: string,
     isForReshare?: boolean
 }
+
+export type NodeManagerConfigs = {
+    /** The NodeManager contract address */
+    address: string,
+    /** The network that node manager deployed on */
+    network: string,
+    /** The Pagination contract address */
+    pagination?: string
+}
+
+export type NetConfigs = {
+    tss: {
+        threshold: number,
+        max: number,
+        defaultTTL: number,
+        pendingPeriod: number,
+    },
+    nodeManager: NodeManagerConfigs,
+    "routing": {
+        "delegate": string[]
+    },
+    "nodes"?: {
+        "onlineList"?: string,
+    },
+    bootstrap: string[],
+    fee?: {
+        endpoint: string,
+        signers: string[]
+    },
+    synchronizer: {
+        "monitor": {
+            "providers": string[],
+            "startDelay": number,
+            "interval": number
+        }
+    }
+}
+
+export type DeploymentTssConfigs = {
+    party: {
+        id: string
+        t: number,
+        max: number
+    },
+    key: {
+        id: string,
+        share: string,
+        publicKey: string,
+        address: string,
+        polynomial?: {
+            t: number,
+            Fx: string[]
+        }
+    }
+}
+
+export type NodeManagerDataRaw = {
+    _lastUpdateTime: string,
+    _nodes: {
+        id: string,
+        nodeAddress: string,
+        stakerAddress: string,
+        peerId: string,
+        active: boolean,
+        startTime: number,
+        endTime: number,
+        lastEditTime: number,
+        isDeployer: boolean,
+    }[]
+}
+
+export type NodeManagerData = {
+    lastUpdateTime: number,
+    nodes: MuonNodeInfo[]
+}
+
+export type WithRequired<T, K extends keyof T> = T & { [P in K]-?: T[P] }
+
+export type MpcType = "DistributedKeyGeneration" | "KeyRedistribution";
+
+export type MpcInitHandler = (constructData, MpcNetwork) => Promise<MultiPartyComputation>

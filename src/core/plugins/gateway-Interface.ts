@@ -42,8 +42,6 @@ export default class GatewayInterface extends BasePlugin{
   }
 
   async __handleCallResponse(callingArgs, response){
-    if(callingArgs.app === 'content')
-      return ;
     if(response?.confirmed){
       try {
         // @ts-ignore
@@ -71,7 +69,7 @@ export default class GatewayInterface extends BasePlugin{
   async __onGatewayCall(message, {pid, uid: callId}){
     // console.log("GatewayInterface.__onGatewayCall", message)
     try {
-      let {app, method, params, nSign, mode, gwSign, fee} = message
+      let {app, method, params, nSign, mode="sign", gwSign, fee} = message
       if(!['sign', 'view'].includes(mode)){
         throw {message: `Invalid call mode: ${mode}`}
       }
@@ -96,9 +94,9 @@ export default class GatewayInterface extends BasePlugin{
         // @ts-ignore
         response = await this.emit(`call/muon/${method}`, callingArgs)
       }
-      console.log("GatewayInterface.__onGatewayCall: calling __handleCallResponse")
+      // console.log("GatewayInterface.__onGatewayCall: calling __handleCallResponse")
       await this.__handleCallResponse(callingArgs, response);
-      console.log("GatewayInterface.__onGatewayCall: __handleCallResponse called")
+      // console.log("GatewayInterface.__onGatewayCall: __handleCallResponse called")
       return response
     }
     catch (e) {
