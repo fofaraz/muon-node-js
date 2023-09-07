@@ -1,4 +1,3 @@
-import {GlobalBroadcastChannels} from "./contantes";
 import BN from 'bn.js'
 import {PublicKey} from "../utils/tss/types";
 import {MultiPartyComputation} from "./mpc/base";
@@ -16,11 +15,7 @@ export type JsonPublicKey = {
     yParity: string
 }
 
-export type RemoteCallOptions = {
-}
-
 export type RemoteMethodOptions = {
-    allowShieldNode?: boolean,
     middlewares?: any[],
 }
 
@@ -48,6 +43,8 @@ export type MuonNodeInfo = {
     staker: string,
     wallet: string,
     peerId: string,
+    tier: number,
+    roles: number[],
     isDeployer: boolean
 }
 
@@ -79,9 +76,6 @@ export type AppDeploymentInfo = {
     /** hash of context */
     contextHash?: string,
 };
-
-type GlobalBroadcastChannelsKeys = keyof typeof GlobalBroadcastChannels;
-export type GlobalBroadcastChannel = typeof GlobalBroadcastChannels[GlobalBroadcastChannelsKeys];
 
 export type Override<T1, T2> = Omit<T1, keyof T2> & T2;
 
@@ -115,6 +109,7 @@ export type AppRequest = {
         params: any,
         timestamp: number,
         result: any,
+        resultHash: string,
         signParams: TypedValue[],
         init: {
             nonceAddress: string,
@@ -188,7 +183,7 @@ export type PolynomialInfoJson = {
 export type AppTssConfig = {
     appId: string,
     seed: string,
-    keyGenRequest: AppRequest,
+    keyGenRequest?: AppRequest,
     publicKey: JsonPublicKey,
     keyShare?: string,
     expiration?: number,
@@ -211,11 +206,10 @@ export type NodeManagerConfigs = {
     address: string,
     /** The network that node manager deployed on */
     network: string,
-    /** The Pagination contract address */
-    pagination?: string
 }
 
 export type NetConfigs = {
+    defaultLeader: string,
     tss: {
         threshold: number,
         max: number,
@@ -239,42 +233,23 @@ export type NetConfigs = {
             "providers": string[],
             "startDelay": number,
             "interval": number
-        }
-    }
-}
-
-export type DeploymentTssConfigs = {
-    party: {
-        id: string
-        t: number,
-        max: number
-    },
-    key: {
-        id: string,
-        share: string,
-        publicKey: string,
-        address: string,
-        polynomial?: {
-            t: number,
-            Fx: string[]
-        }
+        },
+        "dbSyncOnlineThreshold": number
     }
 }
 
 export type NodeManagerDataRaw = {
-    _lastUpdateTime: string,
-    _nodes: {
-        id: string,
-        nodeAddress: string,
-        stakerAddress: string,
-        peerId: string,
-        active: boolean,
-        startTime: number,
-        endTime: number,
-        lastEditTime: number,
-        isDeployer: boolean,
-    }[]
-}
+    id: string,
+    nodeAddress: string,
+    stakerAddress: string,
+    peerId: string,
+    active: boolean,
+    tier: number,
+    roles: number[],
+    startTime: number,
+    endTime: number,
+    lastEditTime: number,
+}[];
 
 export type NodeManagerData = {
     lastUpdateTime: number,

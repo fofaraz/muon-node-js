@@ -1,5 +1,3 @@
-import {GlobalBroadcastChannel, RemoteMethodOptions} from "../../../common/types";
-import NetworkBroadcastPlugin from "../network-broadcast";
 import {NetworkRemoteCallMiddleware} from "../../remotecall-middleware";
 
 function classNames(target): string[]{
@@ -47,15 +45,6 @@ export function broadcastHandler (target, property, descriptor) {
   return descriptor
 }
 
-export function globalBroadcastHandler (title: GlobalBroadcastChannel, options={}) {
-  return function (target, property, descriptor) {
-    if(!target.__globalBroadcastHandlers)
-      target.__globalBroadcastHandlers = []
-    target.__globalBroadcastHandlers.push({title, property, options})
-    return descriptor
-  }
-}
-
 export function remoteApp (constructor): any {
   if(!classNames(constructor).includes('CallablePlugin'))
     throw {message: 'RemoteApp should be CallablePlugin.'}
@@ -68,8 +57,6 @@ export function remoteApp (constructor): any {
           let item = constructor.prototype.__remoteMethods[i];
           // console.log('########## registering remote method', item, this.remoteMethodEndpoint(item.title))
           this.registerRemoteMethod(item.title, this[item.property].bind(this), {
-            /** default options */
-            allowShieldNode: false,
             /** override options */
             middlewares: item.middlewares,
             /** other props */
@@ -77,16 +64,6 @@ export function remoteApp (constructor): any {
             appName: this.APP_NAME,
             appId: this.APP_ID,
           })
-        }
-      }
-
-      if(constructor.prototype.__globalBroadcastHandlers) {
-        const broadcastPlugin: NetworkBroadcastPlugin = this.network.getPlugin('broadcast')
-        for (let i = 0; i < constructor.prototype.__globalBroadcastHandlers.length; i++) {
-          let item = constructor.prototype.__globalBroadcastHandlers[i];
-          await broadcastPlugin.subscribe(item.title)
-          // @ts-ignore
-          broadcastPlugin.on(item.title, this[item.property].bind(this))
         }
       }
 

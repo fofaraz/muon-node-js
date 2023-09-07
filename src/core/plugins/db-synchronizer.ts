@@ -16,7 +16,7 @@ import _ from 'lodash';
 import {muonSha3} from "../../utils/sha3.js";
 import * as crypto from "../../utils/crypto.js";
 import {readSetting, writeSetting} from "../../common/db-models/Settings.js";
-import {APP_STATUS_EXPIRED} from "../constants.js";
+import {APP_STATUS_EXPIRED, APP_STATUS_TSS_GROUP_SELECTED} from "../constants.js";
 
 const DEPLOYER_SYNC_ITEM_PER_PAGE = 100;
 const log = logger("muon:core:plugins:synchronizer")
@@ -25,6 +25,7 @@ const RemoteMethods = {
   GetAllContexts: "get-all-ctx",
   IsSeedListReshared: "is-seed-list-reshared",
   GetMissingContext: "get-missing-context",
+  CanSeedsBeDeleted: "can-seeds-be-deleted",
 }
 
 @remoteApp
@@ -116,7 +117,7 @@ export default class DbSynchronizer extends CallablePlugin {
    other deployers and updates the own context list accordingly.
    */
   private async deployersSyncLoop() {
-    const {monitor: {startDelay, interval}} = this.muon.configs.net.synchronizer;
+    const {monitor: {startDelay, interval},dbSyncOnlineThreshold} = this.muon.configs.net.synchronizer;
     log(`deployers sync loop start %o`, {startDelay, interval})
 
     await timeout(Math.floor((0.5 + Math.random()) * startDelay));
@@ -141,77 +142,83 @@ export default class DbSynchronizer extends CallablePlugin {
 
         const onlineDeployers: string[] = await NetworkIpc.findNOnlinePeer(
           candidateDeployers,
-          3,
+          dbSyncOnlineThreshold,
           {
             timeout: 3000,
             return: 'peerId'
           },
         );
+        if (onlineDeployers.length < dbSyncOnlineThreshold){
+          log(`Cannot perform dbSync, Insufficient online deployers ${onlineDeployers.length}/${dbSyncOnlineThreshold}`);
+        } else {
+          log(`${onlineDeployers.length} online deployers found, performing dbSync`);
+          /** loop while there is more contexts to sync */
+          while(true) {
+            /** paginate and get missing contexts */
+            let res: AppContext[][] = await Promise.all(
+              onlineDeployers.map(peerId => {
+                return this.remoteCall(
+                  peerId,
+                  RemoteMethods.GetMissingContext,
+                  {
+                    from: lastTimestamp + 1,
+                    count: DEPLOYER_SYNC_ITEM_PER_PAGE
+                  },
+                )
+                  .catch(e => [])
+              })
+            );
+            let uniqueList: AppContext[] = Object.values(
+              _.flatten(res).reduce((obj: MapOf<AppContext>, ctx: AppContext): MapOf<AppContext> => {
+                obj[ctx.deploymentRequest!.reqId] = ctx
+                return obj;
+              }, {})
+            );
 
-        /** loop while there is more contexts to sync */
-        while(true) {
-          /** paginate and get missing contexts */
-          let res: AppContext[][] = await Promise.all(
-            onlineDeployers.map(peerId => {
-              return this.remoteCall(
-                peerId,
-                RemoteMethods.GetMissingContext,
-                {
-                  from: lastTimestamp + 1,
-                  count: DEPLOYER_SYNC_ITEM_PER_PAGE
-                },
-              )
-                .catch(e => [])
-            })
-          );
-          let uniqueList: AppContext[] = Object.values(
-            _.flatten(res).reduce((obj: MapOf<AppContext>, ctx: AppContext): MapOf<AppContext> => {
-              obj[ctx.deploymentRequest!.reqId] = ctx
-              return obj;
-            }, {})
-          );
+            if (uniqueList.length > 0) {
+              const lastContextTime: number = uniqueList
+                .filter(ctx => !!ctx.keyGenRequest)
+                .reduce((max, ctx) => Math.max(max, ctx.deploymentRequest!.data.timestamp), 0);
 
-          if (uniqueList.length > 0) {
-            const lastContextTime: number = uniqueList.reduce((max, ctx) => Math.max(max, ctx.deploymentRequest!.data.timestamp), 0);
+              /** filter out locally existing context and keep only missing contexts. */
+              uniqueList = uniqueList.filter(ctx => {
+                const {appId, seed} = ctx
 
-            /** filter out locally existing context and keep only missing contexts. */
-            uniqueList = uniqueList.filter(ctx => {
-              const {appId, seed} = ctx
+                if(appId === "1")
+                  return false;
 
-              if(appId === "1")
-                return false;
+                /** if ctx exist locally */
+                if(!!this.appManager.getAppContext(appId, seed))
+                  return false
 
-              /** if ctx exist locally */
-              if(!!this.appManager.getAppContext(appId, seed))
-                return false
+                const lastContext = this.appManager.getAppLastContext(appId);
+                /** if newer rotated context of app exist locally */
+                if(!!lastContext && lastContext.deploymentRequest!.data.result.timestamp > ctx.deploymentRequest?.data.result.timestamp)
+                  return false;
 
-              const lastContext = this.appManager.getAppLastContext(appId);
-              /** if newer rotated context of app exist locally */
-              if(!!lastContext && lastContext.deploymentRequest!.data.result.timestamp > ctx.deploymentRequest?.data.result.timestamp)
-                return false;
+                return true;
+              })
 
-              return true;
-            })
+              for (const ctx of uniqueList) {
+                await this.appManager.saveAppContext(ctx);
+              }
 
-            for (const ctx of uniqueList) {
-              await this.appManager.saveAppContext(ctx);
+              log(`deployer-sync: there is ${uniqueList.length} missing contexts.`)
+
+              if (lastContextTime > lastTimestamp) {
+                lastTimestamp = lastContextTime
+                log('updating lastTimestamp setting %o', {lastTimestamp})
+                await writeSetting("deployers-sync.lastTimestamp", lastTimestamp);
+              }
             }
 
-            log(`deployer-sync: there is ${uniqueList.length} missing contexts.`)
-
-            if (lastContextTime > lastTimestamp) {
-              lastTimestamp = lastContextTime
-              log('updating lastTimestamp setting %o', {lastTimestamp})
-              await writeSetting("deployers-sync.lastTimestamp", lastTimestamp);
-            }
+            /** break the loop if no more contexts */
+            if(uniqueList.length < DEPLOYER_SYNC_ITEM_PER_PAGE)
+              break;
           }
 
-          /** break the loop if no more contexts */
-          if(uniqueList.length < DEPLOYER_SYNC_ITEM_PER_PAGE)
-            break;
+          this.isDbSynced = true;
         }
-
-        this.isDbSynced = true;
       }
 
       await timeout(Math.floor((0.5 + Math.random()) * interval));
@@ -336,6 +343,18 @@ export default class DbSynchronizer extends CallablePlugin {
       }
     }
 
+    /** check old TSS_GROUP_SELECTED contexts */
+    let groupSelectedContexts:AppContext[] = this.appManager
+      .filterContexts({
+        deploymentStatus: [APP_STATUS_TSS_GROUP_SELECTED],
+        custom: ctx => this.appManager.isSeedReshared(ctx.seed),
+      });
+    // TODO: Is it necessary to check the TSS_GROUP_SELECTED list with the deployers before I deleting it?
+
+    for(const {seed} of groupSelectedContexts) {
+      seedsToDelete.push(seed);
+    }
+
     await AppContextModel.deleteMany({
       $or: [
         /** for backward compatibility. old keys may not have this field. */
@@ -352,7 +371,10 @@ export default class DbSynchronizer extends CallablePlugin {
       ]
     });
     log(`deleting ${seedsToDelete.length} expired contexts from memory of all cluster`)
-    const deleteContextList: AppContext[] = expiredContexts.filter(({seed}) => seedsToDelete.includes(seed))
+    const deleteContextList: AppContext[] = [
+      ... expiredContexts.filter(({seed}) => seedsToDelete.includes(seed)),
+      ... groupSelectedContexts,
+    ];
     CoreIpc.fireEvent({type: "app-context:delete", data: {contexts: deleteContextList}})
     NetworkIpc.fireEvent({type: "app-context:delete", data: {contexts: deleteContextList}})
   }
@@ -402,6 +424,21 @@ export default class DbSynchronizer extends CallablePlugin {
     return seeds.map(seed => {
       return this.appManager.isSeedReshared(seed);
     });
+  }
+
+  @remoteMethod(RemoteMethods.CanSeedsBeDeleted)
+  async __canSeedsBeDeleted(seeds: string[], callerInfo: MuonNodeInfo): Promise<boolean[]> {
+    const currentTime = getTimestamp();
+    return seeds.map(seed => {
+      const context = this.appManager.getSeedContext(seed);
+      if(!context)
+        return true;
+      if(!context.keyGenRequest)
+        return false;
+      if(context.deploymentRequest?.data.expiration > currentTime)
+        return false;
+      return this.appManager.isSeedReshared(seed);
+    })
   }
 
   @remoteMethod(RemoteMethods.GetMissingContext)

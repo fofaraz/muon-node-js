@@ -1,6 +1,6 @@
-import {GlobalBroadcastChannel, RemoteMethodOptions} from '../../../common/types'
-import CoreBroadcastPlugin from "../../../core/plugins/broadcast.js";
 import {CoreRemoteCallMiddleware} from "../../remotecall-middleware";
+import {Constructor} from "../../../common/types";
+import CallablePlugin from "./callable-plugin";
 
 function classNames(target): string[] {
   let names: string[] = []
@@ -56,15 +56,6 @@ export function broadcastHandler (target, property, descriptor) {
   return descriptor
 }
 
-export function globalBroadcastHandler (title: GlobalBroadcastChannel, options={}) {
-  return function (target, property, descriptor) {
-    if(!target.__globalBroadcastHandlers)
-      target.__globalBroadcastHandlers = []
-    target.__globalBroadcastHandlers.push({title, property, options})
-    return descriptor
-  }
-}
-
 /**
  * Exported methods can be call by apps.
  *
@@ -92,7 +83,7 @@ export function appApiMethod (options: ApiExportOptions={}) {
   }
 }
 
-export function remoteApp (constructor): any {
+export function remoteApp (constructor:Constructor<CallablePlugin>): any {
   if(!classNames(constructor).includes('CallablePlugin')) {
     const error = {message: 'RemoteApp should be CallablePlugin.'}
     console.error(error)
@@ -107,25 +98,15 @@ export function remoteApp (constructor): any {
           let item = constructor.prototype.__remoteMethods[i];
           // console.log('########## registering remote method', item, this.remoteMethodEndpoint(item.title))
           this.registerRemoteMethod(item.title, this[item.property].bind(this), {
-            /** default options */
-            allowShieldNode: false,
             /** override options */
             middlewares: item.middlewares,
             /** other props */
             method: item.title,
+            // @ts-ignore
             appName: this.APP_NAME,
+            // @ts-ignore
             appId: this.APP_ID,
           })
-        }
-      }
-
-      if(constructor.prototype.__globalBroadcastHandlers) {
-        const broadcastPlugin: CoreBroadcastPlugin = this.muon.getPlugin('broadcast')
-        for (let i = 0; i < constructor.prototype.__globalBroadcastHandlers.length; i++) {
-          let item = constructor.prototype.__globalBroadcastHandlers[i];
-          await broadcastPlugin.subscribe(item.title)
-          // @ts-ignore
-          broadcastPlugin.on(item.title, this[item.property].bind(this))
         }
       }
 
@@ -143,6 +124,7 @@ export function remoteApp (constructor): any {
           let item = constructor.prototype.__gatewayMethods[i];
           // let logTitle = `${this.APP_NAME}.${item.title}`
           // console.log(`registering gateway method: ${logTitle} >> ${target.name}.${item.property}`)
+          // @ts-ignore
           gateway.registerAppCall(this.APP_NAME, item.title, this[item.property].bind(this))
         }
       }

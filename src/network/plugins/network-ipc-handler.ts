@@ -3,7 +3,7 @@ import {PeerInfo} from "@libp2p/interface-peer-info";
 import {remoteApp, remoteMethod, ipcMethod} from './base/app-decorators.js'
 import {AppContext, AppRequest, IpcCallOptions, JsonPeerInfo, MuonNodeInfo} from "../../common/types";
 import NodeManagerPlugin, {NodeFilterOptions} from "./node-manager.js";
-import {QueueProducer, MessagePublisher, MessageBusConfigs} from "../../common/message-bus/index.js";
+import {MessagePublisher, MessageBusConfigs} from "../../common/message-bus/index.js";
 import _ from 'lodash';
 import RemoteCall from "./remote-call.js";
 import NetworkBroadcastPlugin from "./network-broadcast.js";
@@ -16,6 +16,7 @@ import {isPrivate} from "../utils.js";
 import {GatewayCallParams} from "../../gateway/types";
 import LatencyCheckPlugin from "./latency-check.js";
 import {MapOf} from "../../common/mpc/types";
+import {enqueueAppRequest} from "../../core/ipc.js";
 
 class AggregatorBus extends MessagePublisher {
   async send(message:any){
@@ -42,7 +43,6 @@ if(!!REQUESTS_PUB_SUB_CHANNEL) {
 }
 
 const log = logger('muon:network:plugins:ipc-handler')
-let requestQueue = new QueueProducer(`gateway-requests`);
 
 const tasksCache = new NodeCache({
   stdTTL: 6 * 60, // Keep distributed keys in memory for 6 minutes
@@ -79,7 +79,6 @@ export const IpcMethods = {
   //GetPeerInfoLight: "GPILight",
   ForwardGatewayRequest: "forward-gateway-request",
   GetCurrentNodeInfo: "get-current-node-info",
-  AllowRemoteCallByShieldNode: "allow-remote-call-by-shield-node",
   IsCurrentNodeInNetwork: "is-current-node-in-network",
   GetUptime: "get-uptime",
   FindNOnlinePeer: "FNOP",
@@ -139,7 +138,7 @@ class NetworkIpcHandler extends CallablePlugin {
   @ipcMethod(IpcMethods.FilterNodes)
   async __filterNodes(filter: NodeFilterOptions): Promise<MuonNodeInfo[]> {
     return this.nodeManager.filterNodes(filter)
-      .map(({id, active, staker, wallet, peerId, isDeployer}) => ({id, active, staker, wallet, peerId, isDeployer}));
+      .map(({id, active, staker, wallet, peerId, tier, roles, isDeployer}) => ({id, active, staker, wallet, peerId, tier, roles, isDeployer}));
   }
 
   @ipcMethod(IpcMethods.GetNetworkConfig)
@@ -307,14 +306,8 @@ class NetworkIpcHandler extends CallablePlugin {
     return this.nodeManager.getNodeInfo(process.env.SIGN_WALLET_ADDRESS!);
   }
 
-  @ipcMethod(IpcMethods.AllowRemoteCallByShieldNode)
-  async __allowRemoteCallByShieldNode(data: {method: string, options: any}) {
-    this.remoteCallPlugin.allowCallByShieldNode(data.method, data.options)
-    return true
-  }
-
   @ipcMethod(IpcMethods.IsCurrentNodeInNetwork)
-  async __isCurrentNodeInNetwork() {
+  async __isCurrentNodeInNetwork(): Promise<boolean> {
     const currentNodeInfo = this.nodeManager.getNodeInfo(process.env.SIGN_WALLET_ADDRESS!)
     return !!currentNodeInfo;
   }
@@ -473,7 +466,7 @@ class NetworkIpcHandler extends CallablePlugin {
       /** When the context exists, the node can either process it or send it to the appropriate node. */
       if(partners.includes(currentNode.id)) {
         /** Process the request */
-        return await requestQueue.send(requestData)
+        return await enqueueAppRequest(requestData)
       }
       else {
         /** Forward request to the appropriate node. */
@@ -487,11 +480,22 @@ class NetworkIpcHandler extends CallablePlugin {
     }
     else {
       if(currentNode.isDeployer) {
-        /**
-         The deployer node should contain all the contexts.
-         If it lacks any context, it means that the context does not exist at all.
-         */
-        throw `App's context not found.`
+        if(app === 'deployment') {
+          /**
+           * If deployment context is not exist, it means that genesis key is not initialized.
+           * Two steps are required need to do:
+           * 1) initialize genesis key (calling deployment app init method)
+           * 2) deploy the `deployment` app itself using genesis key.
+           * */
+          throw `Genesis key not initialized`
+        }
+        else {
+          /**
+           The deployer node should contain all the contexts.
+           If it lacks any context, it means that the context does not exist at all.
+           */
+          throw `App's context not found.`
+        }
       }
       else {
         /**

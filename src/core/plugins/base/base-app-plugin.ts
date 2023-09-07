@@ -34,7 +34,7 @@ const { omit } = lodash;
 
 const ajv = createAjv();
 const clone = (obj) => JSON.parse(JSON.stringify(obj))
-const requestConfirmationCache: RedisCache = new RedisCache('req-confirm')
+const requestConfirmationCache: RedisCache = new RedisCache('req-confirm', 3600)
 
 const RemoteMethods = {
   AskSignature: 'AskSign',
@@ -96,7 +96,7 @@ class BaseAppPlugin extends CallablePlugin {
   }
 
   async onStart() {
-    super.onStart();
+    await super.onStart();
     // console.log(`onStart app[${this.APP_NAME}] ...`, this.constructor)
 
     /**
@@ -185,24 +185,17 @@ class BaseAppPlugin extends CallablePlugin {
     let startedAt = getTimestamp()
     let deploymentSeed;
 
-    if(this.APP_ID === '1') {
-      if (!this.keyManager.isReady)
-        throw {message: "Deployment tss is not initialized"}
-      /**
-       deployer list load's from contract and has'nt deployment request and seed.
-       default seed for deployment context is `1`
-       */
-      deploymentSeed = "1"
-    }
-    else{
-      if(!this.appManager.appIsDeployed(this.APP_ID))
-        throw `App not deployed`;
-      const oldestContext: AppContext = this.appManager.getAppOldestContext(this.APP_ID)!
-      if(!this.appManager.appHasTssKey(this.APP_ID, oldestContext.seed)) {
-        throw `App tss not initialized currentNode: ${process.env.SIGN_WALLET_ADDRESS} seed: ${oldestContext.seed}`
+    if(!this.appManager.appIsDeployed(this.APP_ID))
+      throw `App not deployed`;
+    const oldestContext: AppContext = this.appManager.getAppOldestContext(this.APP_ID)!
+    if(!this.appManager.appHasTssKey(this.APP_ID, oldestContext.seed)) {
+      throw {
+        message: `App tss not initialized`,
+        node: this.currentNodeInfo?.id ?? null,
+        seed: oldestContext?.seed ?? null
       }
-      deploymentSeed = oldestContext.seed;
     }
+    deploymentSeed = oldestContext.seed;
 
     const nSign = this.getParty(deploymentSeed)!.t;
 
@@ -300,6 +293,7 @@ class BaseAppPlugin extends CallablePlugin {
       newRequest.reqId = this.calculateRequestId(newRequest, resultHashWithoutSecurityParams)
       newRequest.data.signParams = this.appendSecurityParams(newRequest, appSignParams)
       resultHash = this.hashAppSignParams(newRequest, appSignParams)
+      newRequest.data.resultHash = resultHash;
 
       let isDuplicateRequest = false;
       if(this.requestManager.hasRequest(newRequest.reqId)){
@@ -359,7 +353,7 @@ class BaseAppPlugin extends CallablePlugin {
       this.log(`confirmation done with %s`, confirmed)
       t5 = Date.now()
 
-      let nonce: AppTssKey = await this.keyManager.getSharedKey(`nonce-${newRequest.reqId}`, 15000)
+      let nonce: AppTssKey = await this.keyManager.getSharedKey(`nonce-${newRequest.reqId}`, 15000, {type: "nonce", message: resultHash})
       this.log(`request signed with %o`, nonce.partners);
       this.log('request time parts %o',{
         "req exec time": t1-t0,
@@ -473,6 +467,8 @@ class BaseAppPlugin extends CallablePlugin {
       if(feeResponse.error)
         throw feeResponse.error;
 
+      this.verifyFeeSig(request.reqId, feeResponse.amount, feeResponse.sign);
+
       /** check fee server response */
       const feeAmount: number = parseInt(feeResponse.amount)
       if(feeAmount <= 0)
@@ -487,7 +483,7 @@ class BaseAppPlugin extends CallablePlugin {
   async informRequestConfirmation(request: AppRequest) {
     request = clone(request)
     // await this.onConfirm(request)
-    let nonce: AppTssKey = await this.keyManager.getSharedKey(`nonce-${request.reqId}`)!;
+    let nonce: AppTssKey = await this.keyManager.getSharedKey(`nonce-${request.reqId}`, undefined, {type: "nonce", message: request.data.resultHash})!;
 
     let announceList = this.getParty(request.deploymentSeed)!.partners;
     if(!!this.getConfirmAnnounceGroups) {
@@ -557,11 +553,12 @@ class BaseAppPlugin extends CallablePlugin {
       throw {message: 'App party is not generated'}
 
     let nonceParticipantsCount = Math.ceil(party.t * 1.2)
-    this.log(`generating nonce with ${nonceParticipantsCount} partners.`)
+    this.log(`generating nonce with ${Math.min(nonceParticipantsCount, availablePartners.length)} partners.`)
     let nonce = await this.keyManager.keyGen({appId: this.APP_ID, seed}, {
       id: `nonce-${request.reqId}`,
       partners: availablePartners,
-      maxPartners: nonceParticipantsCount
+      maxPartners: nonceParticipantsCount,
+      usage: {type: "nonce", message: request.data.resultHash},
     })
     this.log(`nonce generation has ben completed with address %s.`, TssModule.pub2addr(nonce.publicKey))
 
@@ -638,7 +635,7 @@ class BaseAppPlugin extends CallablePlugin {
 
     let {s, e} = splitSignature(signature)
     //
-    let nonce: AppTssKey = await this.keyManager.getSharedKey(`nonce-${request.reqId}`)
+    let nonce: AppTssKey = await this.keyManager.getSharedKey(`nonce-${request.reqId}`, undefined, {type: "nonce", message: request.data.resultHash})
 
     const ownerInfo = this.nodeManager.getNodeInfo(owner)
     if(!ownerInfo){
@@ -654,20 +651,35 @@ class BaseAppPlugin extends CallablePlugin {
     return p1 === p2 ? owner : null;
   }
 
-  async verify(hash: string, signature: string, nonceAddress: string): Promise<boolean> {
-    const signingPubKey: MapOf<PublicKey> = await this.appManager.findAppPublicKeys(this.APP_ID);
-    if(Object.keys(signingPubKey).length < 1)
-      throw `app[${this.APP_NAME}] tss publicKey not found`
-    // @ts-ignore
-    for(const publicKey of Object.values(signingPubKey)) {
-      if(TssModule.schnorrVerifyWithNonceAddress(hash, signature, nonceAddress, publicKey))
-        return true;
+  async verifyPartialSignature(request: AppRequest, owner:MuonNodeInfo, signature: string): Promise<boolean> {
+    const appTssKey = this.getTss(request.deploymentSeed)!
+    let nonce: AppTssKey = await this.keyManager.getSharedKey(`nonce-${request.reqId}`, undefined, {type: "nonce", message: request.data.resultHash})
+
+    return TssModule.schnorrVerifyPartial(
+      appTssKey.getPubKey(owner.id),
+      appTssKey.publicKey,
+      nonce.getPubKey(owner.id),
+      nonce.publicKey,
+      request.data.resultHash,
+      signature,
+    );
+  }
+
+  async verify(deploymentSeed: string, hash: string, signature: string, nonceAddress: string): Promise<boolean> {
+    const signingPubKey: PublicKey|null = await this.appManager.findAppPublicKey(this.APP_ID, deploymentSeed);
+    if(!signingPubKey) {
+      throw {
+        message: `app[${this.APP_NAME}] tss publicKey not found`,
+        node: this.currentNodeInfo?.id ?? null,
+        appId: this.APP_ID,
+        seed: deploymentSeed
+      }
     }
-    return false
+    return TssModule.schnorrVerifyWithNonceAddress(hash, signature, nonceAddress, signingPubKey);
   }
 
   async broadcastNewRequest(request: AppRequest) {
-    let nonce: AppTssKey = await this.keyManager.getSharedKey(`nonce-${request.reqId}`, 15000)
+    let nonce: AppTssKey = await this.keyManager.getSharedKey(`nonce-${request.reqId}`, 15000, {type: "nonce", message: request.data.resultHash})
     let party = this.getParty(request.deploymentSeed);
     if(!party)
       throw {message: `${this.ConstructorName}.broadcastNewRequest: app party has not value.`}
@@ -727,7 +739,11 @@ class BaseAppPlugin extends CallablePlugin {
 
   async makeSignature(request: AppRequest, result: any, resultHash): Promise<string> {
     let {reqId} = request;
-    let nonce: AppTssKey = await this.keyManager.getSharedKey(`nonce-${reqId}`, 15000)
+    let nonce: AppTssKey = await this.keyManager.getSharedKey(
+      `nonce-${reqId}`,
+      15000,
+      {type: "nonce", message: request.data.resultHash},
+    );
     if(!nonce)
       throw `nonce not found for request ${reqId}`
 
@@ -769,30 +785,27 @@ class BaseAppPlugin extends CallablePlugin {
     try {
       this.log(`node ${remoteNode.id} signed the request.`)
       let {reqId, sign} = data!;
-      // let request = await Request.findOne({_id: sign.request})
       let request:AppRequest = this.requestManager.getRequest(reqId) as AppRequest
       if (request) {
-        // TODO: check response similarity
-        // let signer = await this.recoverSignature(request, remoteNode.wallet, sign)
-        // if (signer && signer === sign.owner) {
-          // @ts-ignore
+        /**
+         * alice-v1 deployment key is old and does not have polynomial info.
+         * disable verification temporarily for deployment.
+         * */
+        let signatureVerified = request.appId === "1" || (await this.verifyPartialSignature(request, remoteNode, sign))
+        if (signatureVerified) {
           this.requestManager.addSignature(request.reqId, remoteNode.wallet, sign)
-          // // let newSignature = new Signature(sign)
-          // // await newSignature.save()
-        // } else {
-        //   console.log('signature mismatch', {
-        //     request: request.hash,
-        //     signer,
-        //     sigOwner: sign.owner
-        //   })
-        // }
+        }
+        else {
+          this.log.error('partial signature mismatch %o', {reqId: request.reqId, sign, signer: remoteNode.id})
+          this.requestManager.addError(reqId, remoteNode.wallet, {message: "partial signature mismatch"});
+        }
       }
       else{
-        console.log(`BaseAppPlugin.__onRemoteSignTheRequest >> Request not found id:${reqId}`)
+        this.log(`Request not found id:${reqId}`)
       }
     }
     catch (e) {
-      console.error('BaseAppPlugin.__onRemoteSignTheRequest', e);
+      this.log.error('onRemoteSignTheRequest', e);
     }
   }
 
@@ -803,14 +816,6 @@ class BaseAppPlugin extends CallablePlugin {
     if(!plugin.__appApiExports[method])
       throw `Method ${pluginName}.${method} not exported as API method.`
     return plugin[method](...otherArgs)
-  }
-
-  async shieldConfirmedRequest(request) {
-    const [result, hash] = await this.preProcessRemoteRequest(request);
-    return {
-      result,
-      hash
-    }
   }
 
   async preProcessRemoteRequest(request, validation:boolean=true) {
@@ -879,7 +884,7 @@ class BaseAppPlugin extends CallablePlugin {
     const hash = this.hashAppSignParams(request, signParams, false)!
 
     for(let i=0 ; i<request.signatures.length ; i++) {
-      if(!await this.verify(hash, request.signatures[i].signature, request.data.init.nonceAddress)) {
+      if(!await this.verify(_request.deploymentSeed, hash, request.signatures[i].signature, request.data.init.nonceAddress)) {
         throw `TSS signature not verified`
       }
     }
@@ -899,7 +904,7 @@ class BaseAppPlugin extends CallablePlugin {
     const hash = this.hashAppSignParams(request, signParams)
 
     for(let i=0 ; i<request.signatures.length ; i++) {
-      if(!await this.verify(hash!, request.signatures[i].signature, request.data.init.nonceAddress)) {
+      if(!await this.verify(request.deploymentSeed, hash!, request.signatures[i].signature, request.data.init.nonceAddress)) {
         return false
       }
     }
@@ -934,16 +939,8 @@ class BaseAppPlugin extends CallablePlugin {
 
     /** fee checking */
     if(request.data.fee) {
-      const feeConfigs = this.muon.configs.net.fee;
       let {amount, signature} = request.data.fee;
-      const hash = muonSha3(
-        { type: "uint256", value: request.reqId },
-        { type: "uint256", value: amount }
-      )
-      const signer = crypto.recover(hash, signature)
-      if(feeConfigs && !feeConfigs.signers.includes(signer)) {
-        throw `fee consumption signature mismatched.`
-      }
+      this.verifyFeeSig(request.reqId, amount, signature);
       await useOneTime('fee', signature, request.reqId);
     }
 
@@ -983,6 +980,18 @@ class BaseAppPlugin extends CallablePlugin {
     await requestConfirmationCache.set(request.reqId, '1');
 
     return `OK`;
+  }
+
+  verifyFeeSig(requestId, amount, signature) {
+    const feeConfigs = this.muon.configs.net.fee;
+    const hash = muonSha3(
+      {type: "uint256", value: requestId},
+      {type: "uint256", value: amount}
+    );
+    const recoveredSigner = crypto.recover(hash, signature);
+    if (feeConfigs && !feeConfigs.signers.includes(recoveredSigner)) {
+      throw `fee signature mismatched.`
+    }
   }
 }
 

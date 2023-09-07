@@ -6,8 +6,6 @@ import {getCommitId, readFileTail} from "../utils/helpers.js";
 
 const NodeAddress = process.env.SIGN_WALLET_ADDRESS || null;
 const PeerID = process.env.PEER_ID || null
-const shieldForwardUrl = process.env.SHIELD_FORWARD_URL || null
-const shieldedApps = (process.env.SHIELDED_APPS || "").split('|').filter(v => !!v)
 
 const router = Router();
 
@@ -53,14 +51,11 @@ router.use('/', asyncHandler(async (req, res, next) => {
       uptime,
       commitId,
       autoUpdateLogs,
+      timestamp: Date.now()
     },
     managerContract: {
       network: netConfig?.nodeManager?.network,
       address: netConfig?.nodeManager?.address,
-    },
-    shield:{
-      enable: !!shieldForwardUrl,
-      apps: shieldedApps
     },
     addedToNetwork: !!nodeInfo,
     network: {

@@ -10,7 +10,7 @@ import * as NetworkIpc from '../network/ipc.js'
 import MuonBasePlugin from './plugins/base/base-plugin.js';
 import BaseAppPlugin from "./plugins/base/base-app-plugin.js";
 import BasePlugin from "./plugins/base/base-plugin.js";
-import {Constructor, DeploymentTssConfigs, NetConfigs, PolynomialInfoJson} from "../common/types";
+import {Constructor, NetConfigs} from "../common/types";
 
 export type MuonPluginConfigs = any
 
@@ -22,7 +22,6 @@ export type MuonPlugin = {
 
 export type MuonConfigs = {
   plugins: MuonPlugin[],
-  tss: DeploymentTssConfigs,
   net: NetConfigs,
 }
 
@@ -45,19 +44,23 @@ export default class Muon extends Events {
 
   async _initializePlugin(plugins: MuonPlugin[]) {
     for (let plugin of plugins) {
+      try {
+        const pluginInstance = new plugin.module(this, plugin.config)
+        this._plugins[plugin.name] = pluginInstance
+        await pluginInstance.onInit();
 
-      const pluginInstance = new plugin.module(this, plugin.config)
-      this._plugins[plugin.name] = pluginInstance
-      await pluginInstance.onInit();
-
-      if(pluginInstance instanceof BaseAppPlugin) {
-        if(pluginInstance.APP_NAME) {
-          if(this.appNameToIdMap[pluginInstance.APP_NAME])
-            throw `There is two app with same APP_NAME: ${pluginInstance.APP_NAME}`
-          this._apps[pluginInstance.APP_ID] = pluginInstance;
-          this.appIdToNameMap[pluginInstance.APP_ID] = pluginInstance.APP_NAME
-          this.appNameToIdMap[pluginInstance.APP_NAME] = pluginInstance.APP_ID
+        if (pluginInstance instanceof BaseAppPlugin) {
+          if (pluginInstance.APP_NAME) {
+            if (this.appNameToIdMap[pluginInstance.APP_NAME])
+              throw `There is two app with same APP_NAME: ${pluginInstance.APP_NAME}`
+            this._apps[pluginInstance.APP_ID] = pluginInstance;
+            this.appIdToNameMap[pluginInstance.APP_ID] = pluginInstance.APP_NAME
+            this.appNameToIdMap[pluginInstance.APP_NAME] = pluginInstance.APP_ID
+          }
         }
+      }
+      catch (e) {
+        console.error(`error on initializing plugin [${plugin.name}]`, e);
       }
     }
     // console.log('plugins initialized.')
@@ -102,7 +105,12 @@ export default class Muon extends Events {
 
   async _onceStarted() {
     for (let pluginName in this._plugins) {
-      await this._plugins[pluginName].onStart()
+      try {
+        await this._plugins[pluginName].onStart()
+      }
+      catch (e) {
+        console.error(`error on core plugin [${pluginName}].onStart()`, e)
+      }
     }
   }
 

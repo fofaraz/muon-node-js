@@ -149,8 +149,9 @@ const createEnv = async () => {
         "max": 100
       },
       nodeManager: {
-        "network": "mumbai",
-        "address": "0x3112a7D5b3960d2C528cd83217E3170f8d252432"
+        "network": "bsctest",
+        "address": "0x965814CFd2E0Ea3bD57B62182e51E21503a5E7F5",
+        "stake": "0x327E044a3303A6572cDc3ec9EA0998d8138b468e"
       },
       routing: {
         "delegate": [
@@ -166,6 +167,7 @@ const createEnv = async () => {
       ],
       fee: undefined,
       synchronizer: undefined,
+      dbSyncOnlineThreshold: 1
     },
     null,
     2
