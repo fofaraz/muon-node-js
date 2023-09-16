@@ -138,7 +138,7 @@ export async function deployApp(argv, configs) {
 
 }
 
-async function undeployApp(argv, configs) {
+export async function undeployApp(argv, configs) {
   const {app} = argv;
   let deployers = configs.deployers;
   if (!deployers || deployers.length == 0)
