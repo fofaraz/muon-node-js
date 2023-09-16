@@ -63,9 +63,15 @@ export async function loadAppContext(appId, targetIp, targetId) {
   return context;
 }
 
-export async function loadAppContextExplorer(url, appId) {
+export async function loadAppFromExplorer(url, params) {
   console.log(`Query app context from ${url}`);
-  let context = await axios.get(`${url}/v1/?app=explorer&method=app&params[appId]=${appId}`)
+  let context = await axios.get(`${url}/v1/`, {
+    params: {
+      app: "explorer",
+      method: "app",
+      params
+    }
+  })
     .then(({data}) => {
       if (!data.success)
         throw `data.success is false`;
@@ -93,4 +99,9 @@ export function getRandomDeployerIp() {
   // return "18.221.53.56";
   let index = Math.floor(Math.random() * deployerNodes.length);
   return deployerNodes[index].ip;
+}
+
+export function getLatestContext(contexts) {
+  //todo sort then return latest context
+  return contexts[contexts.length - 1];
 }

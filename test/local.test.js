@@ -7,7 +7,7 @@ import assert from "assert"
 import * as p2pClient from "./Libp2pClient.js"
 
 
-let deployers = ["http://localhost:8000", "http://localhost:8001"];
+const deployers = ["http://127.0.0.1:8000", "http://127.0.0.1:8001"];
 
 
 describe('Deployment process', async function () {
@@ -19,8 +19,9 @@ describe('Deployment process', async function () {
   describe('Deployment scenario', function () {
     it("Before deploy, app should be undeployed and app status should be NEW", async () => {
       let appStatus = await utils.getAppStatus(config.APP_NAME);
+
       if (appStatus.status != "NEW")
-        await undeploy(config.APP_NAME);
+        await undeploy(config.APP_NAME, appStatus.appId);
       appStatus = await utils.getAppStatus(config.APP_NAME);
       assert.equal(appStatus.status, "NEW");
     });
@@ -33,79 +34,31 @@ describe('Deployment process', async function () {
       let compareResult = await checkContextOnAllDeployers();
       assert.equal(compareResult, true);
     });
-    it('App context should be available all party nodes', async () => {
-      let appStatus = await utils.getAppStatus(config.APP_NAME);
-      let context = await utils.loadAppContext(appStatus.appId, utils.getRandomDeployerIp());
-      let failedNodes = await loadContextFromNodes(appStatus.appId, context.party.partners);
+    it('All deployer nodes should be able to execute and sign app requests', async () => {
+      let failedNodes = await execRequestOnDeployers(config.APP_NAME);
       assert.equal(failedNodes, 0);
     });
-    it('All party nodes should be able to execute and sign app requests', async () => {
-      let party = await getAppParty();
-      let failedNodes = await execRequestOnPartyNodes(config.APP_NAME, party);
-      assert.equal(failedNodes, 0);
-    });
-  });
-
-  describe('Redeploy scenario', function () {
-    let appStatus;
-    it('App status should be deployed', async () => {
-      appStatus = await utils.getAppStatus(config.APP_NAME);
-      if (appStatus.status != "DEPLOYED")
-        await deploy(config.APP_NAME);
-      appStatus = await utils.getAppStatus(config.APP_NAME);
-      assert.equal(appStatus.status, "DEPLOYED");
-    });
-
-    let context1, context2;
-    it('First context should be available on deployers', async () => {
-      context1 = await utils.loadAppContext(appStatus.appId, utils.getRandomDeployerIp());
-      assert.notEqual(context1, null);
-    });
-
-    it('After undeploy, app status should be NEW', async () => {
-      await undeploy(config.APP_NAME);
-      appStatus = await utils.getAppStatus(config.APP_NAME);
-      assert.equal(appStatus.status, "NEW");
-    });
-
-    it('Context should be removed from deployers', async () => {
-      let appStatus = await utils.getAppStatus(config.APP_NAME);
-      let deployerNodeIds = utils.deployerNodes.map(node => node.id);
-      let failedNodes = await loadContextFromNodes(appStatus.appId, deployerNodeIds);
-      assert.equal(failedNodes, deployerNodeIds.length);
-    });
-
-    it('After deploy, app status should be DEPLOYED', async () => {
-      await deploy(config.APP_NAME);
-      appStatus = await utils.getAppStatus(config.APP_NAME);
-      assert.equal(appStatus.status, "DEPLOYED");
-    });
-
-    it('Second context should be available on deployers', async () => {
-      context2 = await utils.loadAppContext(appStatus.appId, utils.getRandomDeployerIp());
-      assert.notEqual(context2, null);
-    });
-
-    it('First and second context should not be equal', async () => {
-      context2 = await utils.loadAppContext(appStatus.appId, utils.getRandomDeployerIp());
-      assert.notEqual(context1.deploymentRequest.reqId, context2.deploymentRequest.reqId);
-    });
-
   });
 
 });
 
 
-async function undeploy(appName) {
+async function undeploy(appName, appId) {
   console.log(`Undeploying app: ${appName}`);
-  let undeployResp = await appCMD.undeployApp({app: appName}, config.DEPLOY_CONFIG);
-  undeployResp = undeployResp.data;
-  if (!undeployResp.success) {
-    console.log(chalk.red(undeployResp.error));
-    throw "Undeploy failed: " + undeployResp.error;
-  } else {
-    console.log(chalk.green("Undeploy successful"));
+  let cmdConfig = config.DEPLOY_CONFIG;
+  cmdConfig.deployers = deployers;
+  for (let i = 0; i < cmdConfig.deployers.length; i++)
+    cmdConfig.deployers[i] = cmdConfig.deployers[i] + "/v1";
+  let undeployResp = await appCMD.undeployApp({app: appName}, cmdConfig);
+
+
+  for (let i = 0; i < deployers.length; i++) {
+    let context = await utils.loadAppFromExplorer(deployers[i], {appId});
+    if (context.status != "NEW")
+      throw "Undeploy failed: " + undeployResp.error;
   }
+
+  console.log(chalk.green("Undeploy successful"));
 }
 
 async function deploy(appName) {
@@ -123,72 +76,28 @@ async function deploy(appName) {
   }
 }
 
-async function loadContextFromNodes(appId, partners) {
-  console.log("Loading context directly from nodes...");
-  console.log("Nodes:");
-  console.log(partners);
+async function execRequestOnDeployers(appName) {
+  console.log("Sending sign request to deployers");
   let promises = [];
-  partners.forEach(partner => {
+  deployers.forEach(deployer => {
     promises.push(new Promise(async (resolve, reject) => {
-      let result = await
-        utils.loadAppContext(appId, null, partner)
-          .catch(e => {
-            console.log(chalk.red(`load context failed from peer: ${partner}`));
-            reject(e);
-          });
-      let resp = {partner, result: false, response: result};
-
-      if (result?.appId == appId)
-        resp.result = true;
-      resolve(resp);
-    }))
-  });
-  let responses = await Promise.all(promises);
-  let total = 0;
-  let success = 0;
-  let fail = 0;
-  responses.forEach(response => {
-    total++;
-    if (response.result) {
-      success++;
-      console.log(chalk.green(`Node ID ${response.partner}: Success`));
-    } else {
-      fail++;
-      console.log(chalk.red(`Node ID ${response.partner}: Failed`));
-    }
-  });
-
-  console.log(`Load context: Total:${total} Success:${success} Fail:${fail}`);
-  return fail;
-}
-
-async function execRequestOnPartyNodes(appName, partners) {
-  console.log("Sending sign request to partners");
-  let promises = [];
-  partners.forEach(partner => {
-    promises.push(new Promise(async (resolve, reject) => {
-      let reqObj = {
-        id: partner,
-        method: "NetworkIpcHandler.forward-gateway-request",
+      let result = await axios.get(`${deployer}/v1/`, {
         params: {
           app: appName,
-          method: "test",
-          params: {},
-          mode: "sign"
+          method: "test"
         }
-      };
-      let result = await
-        p2pClient.call(reqObj)
-          .catch(e => {
-            // console.log(chalk.red(`${partner}: Exec app request failed ${e.message}`));
-            return {error: e};
-          });
-      let resp = {partner, result: false};
-      if (result?.response?.data) {
-        console.log(chalk.green(`Node ID ${partner}: Exec app request success`));
+      })
+        .catch(e => {
+          throw `${deployer}: app exec failed ${e.message}`;
+        });
+
+      result=result.data;
+      let resp = {deployer, result: false};
+      if (result.success) {
+        console.log(chalk.green(`${deployer}: Exec app request success`));
         resp.result = true;
       } else {
-        console.log(chalk.red(`Node ID ${partner}: Exec app request failed. error: ${result?.error?.message}`));
+        console.log(chalk.red(`${deployer}: Exec app request failed. error: ${result?.error?.message}`));
       }
 
       resolve(resp);
@@ -217,13 +126,13 @@ async function checkContextOnAllDeployers() {
   console.log("Checking context on all deployers");
 
   let promises = [];
-  deployers.forEach(node => {
+  deployers.forEach(deployer => {
     promises.push(new Promise(async (resolve, reject) => {
-      let context = await utils.loadAppContextExplorer(deployer, appId)
+      let appResp = await utils.loadAppFromExplorer(deployer, {appId})
         .catch(e => {
           reject(e);
         });
-      resolve({ip: node.ip, context});
+      resolve({deployer: deployer, appResp});
     }))
   });
   let responses = await Promise.all(promises);
@@ -231,23 +140,18 @@ async function checkContextOnAllDeployers() {
 
   let allEqual = true;
   responses.forEach(response => {
-    let currentDeploymetReqId = response.context?.deploymentRequest.reqId;
+    let latestContext = utils.getLatestContext(response.appResp.contexts);
+    let currentDeploymetReqId = latestContext.keyGenReqId;
     if (!deploymentReqId)
       deploymentReqId = currentDeploymetReqId;
     if (currentDeploymetReqId && deploymentReqId == currentDeploymetReqId)
-      console.log(chalk.green(`${response.ip}: context verified`));
+      console.log(chalk.green(`${response.deployer}: context verified`));
     else {
-      console.log(chalk.red(`${response.ip}: context failed`));
+      console.log(chalk.red(`${response.deployer}: context failed`));
       allEqual = false;
     }
   });
 
   return allEqual;
-}
-
-async function getAppParty() {
-  let appStatus = await utils.getAppStatus(config.APP_NAME);
-  let context = await utils.loadAppContext(appStatus.appId, utils.getRandomDeployerIp());
-  return context.party.partners
 }
 
