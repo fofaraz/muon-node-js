@@ -4,7 +4,6 @@ import * as utils from './utils.js'
 import * as config from './config.js'
 import chalk from 'chalk'
 import assert from "assert"
-import * as p2pClient from "./Libp2pClient.js"
 
 
 const deployers = ["http://127.0.0.1:8000", "http://127.0.0.1:8001"];
@@ -46,7 +45,7 @@ describe('Deployment process', async function () {
 async function undeploy(appName, appId) {
   console.log(`Undeploying app: ${appName}`);
   let cmdConfig = config.DEPLOY_CONFIG;
-  cmdConfig.deployers = deployers;
+  cmdConfig.deployers = [...deployers];
   for (let i = 0; i < cmdConfig.deployers.length; i++)
     cmdConfig.deployers[i] = cmdConfig.deployers[i] + "/v1";
   let undeployResp = await appCMD.undeployApp({app: appName}, cmdConfig);
