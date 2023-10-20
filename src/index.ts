@@ -6,8 +6,8 @@ import * as Network from './network/index.js'
 import * as Core from './core/index.js'
 import * as NetworkIpc from './network/ipc.js'
 import * as SharedMemory from './common/shared-memory/index.js'
-import { parseBool, timeout } from './utils/helpers.js'
-import { createRequire } from "module";
+import {parseBool, timeout} from './utils/helpers.js'
+import {createRequire} from "module";
 import {reportCrash} from "./common/analitics-reporter.js";
 
 // const require = createRequire(import.meta.url);
@@ -15,7 +15,7 @@ const log = logger('muon:boot')
 
 type ClusterType = 'gateway' | 'networking' | "core"
 
-process.on('unhandledRejection', async function(reason, _promise) {
+process.on('unhandledRejection', async function (reason, _promise) {
   // console.log("Unhandled promise rejection", _promise);
   console.dir(reason, {depth: 5})
 
@@ -34,26 +34,35 @@ process.on('unhandledRejection', async function(reason, _promise) {
   process.exit(1);
 });
 
+const gracefulClusterShutdown = (signal: NodeJS.Signals) => async () => {
+  for (let id in cluster.workers) {
+    let process_id = cluster!.workers[id]!.process.pid;
+    process.kill(process_id!);
+  }
+}
+
+process.on('SIGTERM', gracefulClusterShutdown('SIGTERM'))
+process.on('SIGINT', gracefulClusterShutdown('SIGINT'))
 
 let clusterCount = 1;
-if(parseBool(process.env.CLUSTER_MODE)) {
-  if(process.env.CLUSTER_COUNT) {
+if (parseBool(process.env.CLUSTER_MODE)) {
+  if (process.env.CLUSTER_COUNT) {
     clusterCount = parseInt(process.env.CLUSTER_COUNT);
     clusterCount = Math.min(clusterCount, os.cpus().length)
   }
-  else{
+  else {
     clusterCount = Math.min(os.cpus().length, 4);
   }
 }
 
-type ClusterInfo = {type: ClusterType, worker: Worker}
-type ApplicationDictionary = {[index: number]: ClusterInfo}
+type ClusterInfo = { type: ClusterType, worker: Worker }
+type ApplicationDictionary = { [index: number]: ClusterInfo }
 
-const applicationWorkers:ApplicationDictionary = {};
+const applicationWorkers: ApplicationDictionary = {};
 
 function runNewApplicationCluster(type: ClusterType): Worker | null {
-  const child:Worker = cluster.fork({MUON_CLUSTER_TYPE: type});//{MASTER_PROCESS_ID: process.pid}
-  if(!child?.process?.pid){
+  const child: Worker = cluster.fork({MUON_CLUSTER_TYPE: type});//{MASTER_PROCESS_ID: process.pid}
+  if (!child?.process?.pid) {
     log(`application cluster does not start correctly.`)
     return null;
   }
@@ -87,44 +96,44 @@ async function boot() {
 
     /** Start core clusters */
     for (let i = 0; i < clusterCount; i++) {
-      const child:Worker|null = runNewApplicationCluster('core');
-      if(child === null){
+      const child: Worker | null = runNewApplicationCluster('core');
+      if (child === null) {
         i--;
         log(`child process fork failed. trying one more time`);
-      }else
+      } else
         await NetworkIpc.reportClusterStatus(child.process.pid, 'start')
     }
 
     /** restart stopped cluster */
     cluster.on("exit", async function (worker, code, signal) {
       log(`Worker ${worker.process.pid} died with code: ${code}, and signal: ${signal}`);
-      let clusterInfo:ClusterInfo;
+      let clusterInfo: ClusterInfo;
 
-      if(!worker.process.pid) {
+      if (!worker.process.pid) {
         log(`a worker with an unknown pid stopped working.`)
         await refreshWorkersList();
       }
       else {
         clusterInfo = applicationWorkers[worker.process.pid];
         delete applicationWorkers[worker.process.pid];
-        if(clusterInfo.type === 'core') {
+        if (clusterInfo.type === 'core') {
           await NetworkIpc.reportClusterStatus(worker.process.pid, 'exit')
         }
 
         await timeout(5000);
         log(`Starting a new cluster type:${clusterInfo.type}`);
         let child = runNewApplicationCluster(clusterInfo.type);
-        if(!child){
-          return ;
+        if (!child) {
+          return;
         }
-        if(clusterInfo.type === 'core') {
+        if (clusterInfo.type === 'core') {
           await NetworkIpc.reportClusterStatus(child.process.pid, 'start')
         }
       }
     });
   }
   else {
-    const clusterType:ClusterType = process.env.MUON_CLUSTER_TYPE! as ClusterType;
+    const clusterType: ClusterType = process.env.MUON_CLUSTER_TYPE! as ClusterType;
     log(`child cluster start type:${clusterType} pid:${process.pid}`)
     // require('./core').start();
     switch (clusterType) {
